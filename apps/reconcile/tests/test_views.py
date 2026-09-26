@@ -560,6 +560,21 @@ def test_delivery_links_reverse_on_submission_detail_and_owner_dashboard(
     assert expected_url.encode() in dashboard.content
 
 
+def test_owner_dashboard_exposes_inventory_capture_in_sidebar_and_delivery_section(
+    client,
+    owner,
+):
+    client.force_login(owner)
+
+    dashboard = client.get(reverse("reconcile:owner-dashboard"))
+    inventory_url = reverse("capture:inventory").encode()
+
+    assert dashboard.status_code == 200
+    assert dashboard.content.count(b'href="' + inventory_url + b'"') >= 2
+    assert b">Inventory</a>" in dashboard.content
+    assert b">Receive delivery</a>" in dashboard.content
+
+
 def make_daily_reconciliation(employee, *, submission_status=SubmissionStatus.READY):
     submission = make_submission(
         employee,

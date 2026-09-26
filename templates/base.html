@@ -26,6 +26,7 @@
       <nav>
         <a href="{% url 'core:home' %}" {% if request.resolver_match.namespace == 'core' %}aria-current="page"{% endif %}>Today</a>
         <a href="{% url 'capture:list' %}" {% if request.resolver_match.namespace == 'capture' and request.resolver_match.url_name == 'list' %}aria-current="page"{% endif %}>Submissions</a>
+        <a href="{% url 'capture:inventory' %}" {% if request.resolver_match.namespace == 'inventory' or request.resolver_match.url_name == 'inventory' %}aria-current="page"{% endif %}>Inventory</a>
         {% if request.user.is_owner %}
           <a href="{% url 'reconcile:owner-dashboard' %}" {% if request.resolver_match.url_name == 'owner-dashboard' %}aria-current="page"{% endif %}>Owner review</a>
           <a href="{% url 'reconcile:daily-cash' %}" {% if request.resolver_match.url_name == 'daily-cash' %}aria-current="page"{% endif %}>Daily cash</a>

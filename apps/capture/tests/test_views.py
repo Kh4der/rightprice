@@ -92,6 +92,18 @@ def test_capture_forms_render_the_camera_widget(client, employee, url_name):
     assert b"Take photo or choose file" in response.content
 
 
+def test_inventory_navigation_is_visible_to_owner_and_employee(client, owner, employee):
+    inventory_url = reverse("capture:inventory").encode()
+
+    for user in (owner, employee):
+        client.force_login(user)
+        response = client.get(reverse("capture:daily"))
+
+        assert response.status_code == 200
+        assert response.content.count(b'href="' + inventory_url + b'"') == 2
+        assert b">Inventory</a>" in response.content
+
+
 def test_submission_list_and_detail_are_scoped_to_employee(client, employee, other_employee):
     own = make_submission(employee)
     other = make_submission(other_employee)

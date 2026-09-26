@@ -62,7 +62,7 @@
     {% else %}<div class="empty-state small"><p>No payouts are waiting.</p></div>{% endif %}
   </section>
   <section class="section-block">
-    <div class="section-heading"><div><p class="eyebrow">Square inventory</p><h2>Delivery drafts</h2></div></div>
+    <div class="section-heading"><div><p class="eyebrow">Square inventory</p><h2>Delivery drafts</h2></div><a class="button secondary" href="{% url 'capture:inventory' %}">Receive delivery</a></div>
     {% if deliveries %}
       <div class="activity-list">
       {% for delivery in deliveries %}
