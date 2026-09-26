@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% load store_ops %}
+{% block title %}{{ submission.get_kind_display }} · {{ submission.business_day }}{% endblock %}
+{% block content %}
+<header class="page-header detail-header">
+  <div>
+    <a class="back-link" href="{% url 'capture:list' %}">Back to submissions</a>
+    <p class="eyebrow">{{ submission.business_day }} · {{ submission.submitted_by.display_name }}</p>
+    <h1>{{ submission.get_kind_display }}</h1>
+    <p>Submitted {{ submission.created_at|date:"M j, Y \a\t g:i A" }}</p>
+  </div>
+  <span class="status large {{ submission.status|status_class }}">{{ submission.get_status_display }}</span>
+</header>
+
+{% if submission.processing_error %}
+  <div class="notice warning" role="status"><strong>Automatic reading needs attention</strong><p>{{ submission.processing_error }}</p></div>
+{% endif %}
+{% if submission.owner_note %}
+  <div class="notice {% if submission.status == 'REJECTED' %}danger{% else %}neutral{% endif %}"><strong>Owner note</strong><p>{{ submission.owner_note }}</p></div>
+{% endif %}
+
+<section class="section-block">
+  <div class="section-heading"><div><p class="eyebrow">Source evidence</p><h2>Photos</h2></div><span>{{ submission.documents.count }} file{{ submission.documents.count|pluralize }}</span></div>
+  <div class="document-grid">
+    {% for document in submission.documents.all %}
+      <article class="document-card">
+        <a class="document-image" href="{% url 'capture:document-file' document.pk %}" target="_blank" rel="noopener">
+          <img src="{% url 'capture:document-file' document.pk %}" alt="Uploaded {{ document.get_requested_type_display }}">
+        </a>
+        <div class="document-body">
+          <div class="document-heading"><h3>{{ document.get_detected_type_display }}</h3><span class="status {{ document.status|status_class }}">{{ document.get_status_display }}</span></div>
+          <p class="meta">{{ document.original_name }} · {{ document.size_bytes|filesizeformat }}</p>
+          {% if document.processing_error %}<p class="inline-error">{{ document.processing_error }}</p>{% endif %}
+          {% if document.check_results %}
+            <div class="check-list">
+              {% for check in document.check_results %}
+                <div class="check-row"><span>{{ check.name|default:"Validation" }}</span><strong>{% if check.passed %}Passed{% else %}Review{% endif %}</strong></div>
+              {% endfor %}
+            </div>
+          {% endif %}
+          {% if document.extracted_data %}
+            <details class="raw-details"><summary>View extracted fields</summary><pre>{{ document.extracted_data|pretty_json }}</pre></details>
+          {% endif %}
+          {% if request.user.is_owner and document.status == 'NEEDS_REVIEW' and not submission.is_terminal %}
+            <form method="post" action="{% url 'capture:document-review' document.pk %}" class="document-review-form">
+              {% csrf_token %}<label for="review_reason_{{ document.pk }}">Owner review reason</label><textarea id="review_reason_{{ document.pk }}" name="reason" rows="2" required minlength="5" placeholder="What did you verify or correct?"></textarea><button class="button secondary small" type="submit">Accept with audit note</button>
+            </form>
+          {% endif %}
+        </div>
+      </article>
+    {% empty %}
+      <div class="empty-state"><h3>No photos</h3></div>
+    {% endfor %}
+  </div>
+</section>
+
+{% if payout %}
+<section class="section-block metric-panel">
+  <div><p class="eyebrow">Payout ledger</p><h2>{{ payout.amount_cents|money }}</h2><p>{{ payout.get_status_display }}</p></div>
+  {% if payout.employee_reported_amount_cents is not None %}<div><span>Employee entered</span><strong>{{ payout.employee_reported_amount_cents|money }}</strong></div>{% endif %}
+  {% if payout.extracted_amount_cents is not None %}<div><span>Photo reading</span><strong>{{ payout.extracted_amount_cents|money }}</strong></div>{% endif %}
+  {% if payout.ticket_reference %}<div><span>Ticket</span><strong>{{ payout.ticket_reference }}</strong></div>{% endif %}
+  {% if payout.validation_reference %}<div><span>Validation</span><strong>{{ payout.validation_reference }}</strong></div>{% endif %}
+  {% if payout.game_name %}<div><span>Game</span><strong>{{ payout.game_name }}</strong></div>{% endif %}
+</section>
+{% if request.user.is_owner and not submission.is_terminal and payout.status == 'PENDING' %}
+<section class="section-block payout-confirmation">
+  <div><p class="eyebrow">Owner check</p><h2>Confirm the payout amount</h2><p>{% if payout.employee_reported_amount_cents != payout.extracted_amount_cents and payout.employee_reported_amount_cents is not None and payout.extracted_amount_cents is not None %}The employee entry and photo reading disagree. Check the evidence before choosing the ledger amount.{% else %}Compare the amount with the photo, then confirm it for approval.{% endif %}</p></div>
+  <form method="post" action="{% url 'reconcile:payout-amount' payout.pk %}" class="inline-form">
+    {% csrf_token %}<label for="payout_amount">Confirmed amount</label><div class="money-input"><span>$</span><input id="payout_amount" name="amount" inputmode="decimal" required value="{{ payout_amount_initial|default:'' }}" placeholder="0.00"></div><button class="button secondary" type="submit">Confirm amount</button>
+  </form>
+</section>
+{% endif %}
+{% endif %}
+
+{% if delivery %}
+<section class="section-block">
+  <div class="section-heading"><div><p class="eyebrow">Inventory draft</p><h2>{{ delivery.invoice_number|default:"Invoice awaiting extraction" }}</h2></div><a class="button secondary" href="{% url 'inventory:delivery-detail' delivery.pk %}">Review invoice lines</a></div>
+  <div class="summary-strip inline"><div><span>Status</span><strong>{{ delivery.get_status_display }}</strong></div><div><span>Lines to resolve</span><strong>{{ delivery.unresolved_line_count }}</strong></div><div><span>Invoice total</span><strong>{{ delivery.invoice_total_cents|money }}</strong></div></div>
+</section>
+{% endif %}
+
+{% if reconciliation %}
+<section class="section-block">
+  <div class="section-heading"><div><p class="eyebrow">Reconciliation</p><h2>{{ reconciliation.get_status_display }}</h2>{% if reconciliation.square_synced_at %}<p class="meta">Square pulled {{ reconciliation.square_synced_at|date:"M j, Y \a\t g:i A" }}</p>{% endif %}</div>{% if request.user.is_owner and not submission.is_terminal %}{% if submission.status == 'READY' or submission.status == 'NEEDS_REVIEW' %}<form method="post" action="{% url 'reconcile:sync-square-day' submission.pk %}">{% csrf_token %}<button class="button secondary" type="submit">Pull Square day</button></form>{% endif %}{% endif %}</div>
+  {% if reconciliation.missing_evidence %}<div class="notice warning"><strong>Missing evidence</strong><p>{{ reconciliation.missing_evidence|join:", " }}</p></div>{% endif %}
+  <div class="summary-strip four inline"><div><span>Photo expected cash</span><strong>{{ reconciliation.paper_expected_cash_cents|money }}</strong></div><div><span>Square API expected cash</span><strong>{{ reconciliation.square_expected_cash_cents|money }}</strong></div><div><span>Photo counted cash</span><strong>{{ reconciliation.counted_cash_cents|money }}</strong></div><div><span>Unexplained variance</span><strong>{{ reconciliation.unexplained_variance_cents|money }}</strong></div></div>
+  {% if reconciliation.square_synced_at %}
+  <div class="square-checks" aria-label="Paper compared with Square">
+    {% for check in reconciliation.check_results %}{% if check.source == 'square_api' %}
+      <div class="square-check-row">
+        <span>{{ check.name|square_check_label }}</span>
+        {% if check.kind == 'identity' %}
+          <span>Employee <strong>{{ check.paper_value|default:"Not mapped" }}</strong></span><span>Square <strong>{{ check.square_value|default:"Missing" }}</strong></span><span class="status {% if check.passed %}approved{% else %}needs-review{% endif %}">{% if check.passed %}Match{% elif check.available %}Different employee{% else %}Missing{% endif %}</span>
+        {% else %}
+          <span>Photo <strong>{{ check.paper_cents|money }}</strong></span><span>Square <strong>{{ check.square_cents|money }}</strong></span><span class="status {% if check.passed %}approved{% else %}needs-review{% endif %}">{% if check.passed %}Match{% elif check.available %}Off {{ check.delta_cents|money }}{% else %}Missing{% endif %}</span>
+        {% endif %}
+      </div>
+    {% endif %}{% endfor %}
+  </div>
+  {% endif %}
+  {% if request.user.is_owner %}
+    <div class="collection-panel daily-cash-detail-panel">
+      <div>
+        <p class="eyebrow">Weekly owner pickup</p>
+        <h3>Daily cash</h3>
+        {% if submission.status == 'APPROVED' %}
+          <p>Expected daily cash is {{ reconciliation.expected_collection_cents|money }}: all cash in the register {{ reconciliation.counted_cash_cents|money }} minus the {{ reconciliation.drawer_float_cents|money }} drawer float.</p>
+          {% if reconciliation.owner_collected_cents is not None %}
+            <span class="status {% if reconciliation.collection_variance_cents == 0 %}approved{% else %}mismatch{% endif %}">{% if reconciliation.collection_variance_cents == 0 %}Match{% else %}Issue · Off {{ reconciliation.collection_variance_cents|money }}{% endif %}</span>
+          {% else %}
+            <span class="status provisional">Waiting count</span>
+          {% endif %}
+        {% else %}
+          <p>Approve the daily Square and register evidence first. The owner can then count this day's cash during the weekly collection.</p>
+          <span class="status provisional">Not ready for pickup</span>
+        {% endif %}
+      </div>
+      <div class="daily-cash-detail-action">
+        {% if reconciliation.owner_collected_cents is not None %}<span>Latest owner count</span><strong>{{ reconciliation.owner_collected_cents|money }}</strong>{% endif %}
+        <a class="button secondary" href="{% url 'reconcile:daily-cash' %}?week={{ daily_cash_week_start|date:'Y-m-d' }}#daily-cash-{{ reconciliation.pk }}">{% if reconciliation.owner_collected_cents is not None %}Review or correct count{% else %}Open weekly collection{% endif %}</a>
+      </div>
+    </div>
+    {% if daily_cash_history %}
+      <details class="daily-cash-history compact-history">
+        <summary>Count history · {{ daily_cash_history|length }} entr{{ daily_cash_history|length|pluralize:"y,ies" }}</summary>
+        <div class="daily-cash-history-list">
+          {% for count in daily_cash_history %}
+            <div><span>{{ count.created_at|date:"M j, Y · g:i A" }} · {{ count.entered_by.display_name }}</span><strong>{{ count.counted_cents|money }}</strong><small>Expected {{ count.expected_cents|money }} · Difference {{ count.variance_cents|money }}{% if count.note %} · {{ count.note }}{% endif %}</small></div>
+          {% endfor %}
+        </div>
+      </details>
+    {% endif %}
+  {% endif %}
+</section>
+{% endif %}
+
+{% if not submission.is_terminal %}
+<section class="decision-panel">
+  {% if request.user.is_owner %}
+    <form method="post" action="{% url 'reconcile:decision' submission.pk %}" class="decision-form">
+      {% csrf_token %}
+      <label for="owner_note">Owner note</label>
+      <textarea id="owner_note" name="owner_note" rows="3" placeholder="Required when rejecting; optional when approving"></textarea>
+      <div class="button-row">
+        <button class="button danger" type="submit" name="decision" value="reject">Reject</button>
+        <button class="button primary" type="submit" name="decision" value="approve">Approve evidence</button>
+      </div>
+    </form>
+  {% endif %}
+  {% if submission.status == 'FAILED' or submission.status == 'NEEDS_REVIEW' %}
+    <form method="post" action="{% url 'capture:retry' submission.pk %}">
+      {% csrf_token %}<button class="button secondary" type="submit">Run automatic reading again</button>
+    </form>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

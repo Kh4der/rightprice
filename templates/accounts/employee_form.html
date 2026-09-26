@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}{% if employee %}Edit employee{% else %}Add employee{% endif %} · Store Ops{% endblock %}
+{% block content %}
+<header class="page-header compact">
+  <a class="back-link" href="{% url 'accounts:employees' %}">Back to employees</a>
+  <p class="eyebrow">Owner settings</p>
+  <h1>{% if employee %}Edit {{ employee.display_name }}{% else %}Add employee{% endif %}</h1>
+  <p>Square generates the team member ID. The login code is the short code used only in this app.</p>
+</header>
+<form method="post" class="form-panel wide" novalidate>
+  {% csrf_token %}
+  {% if form.errors %}<div class="error-summary" role="alert" tabindex="-1" data-error-summary><strong>Check the highlighted fields</strong></div>{% endif %}
+  {% for field in form %}
+    <div class="field {% if field.errors %}field-error{% endif %}">
+      <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+      {% if field.help_text %}<p class="help-text">{{ field.help_text }}</p>{% endif %}
+      {{ field }}
+      {% for error in field.errors %}<p class="field-message">{{ error }}</p>{% endfor %}
+    </div>
+  {% endfor %}
+  <div class="button-row"><a class="button ghost" href="{% url 'accounts:employees' %}">Cancel</a><button class="button primary" type="submit">Save employee</button></div>
+</form>
+{% endblock %}

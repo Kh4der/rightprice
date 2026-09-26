@@ -1,0 +1,65 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#020617">
+  <title>{% block title %}Store Ops{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  <script src="{% static 'js/app.js' %}" defer></script>
+</head>
+<body class="{% if not request.user.is_authenticated %}auth-shell{% endif %}">
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  {% if request.user.is_authenticated %}
+    <header class="topbar">
+      <a class="brand" href="{% url 'core:home' %}" aria-label="Store Ops home">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>Store Ops</span>
+      </a>
+      <div class="account-chip">
+        <span class="account-name">{{ request.user.display_name }}</span>
+        <span class="account-role">{{ request.user.get_role_display }}</span>
+      </div>
+    </header>
+    <aside class="sidebar" aria-label="Primary navigation">
+      <nav>
+        <a href="{% url 'core:home' %}" {% if request.resolver_match.namespace == 'core' %}aria-current="page"{% endif %}>Today</a>
+        <a href="{% url 'capture:list' %}" {% if request.resolver_match.namespace == 'capture' and request.resolver_match.url_name == 'list' %}aria-current="page"{% endif %}>Submissions</a>
+        {% if request.user.is_owner %}
+          <a href="{% url 'reconcile:owner-dashboard' %}" {% if request.resolver_match.url_name == 'owner-dashboard' %}aria-current="page"{% endif %}>Owner review</a>
+          <a href="{% url 'reconcile:daily-cash' %}" {% if request.resolver_match.url_name == 'daily-cash' %}aria-current="page"{% endif %}>Daily cash</a>
+          <a href="{% url 'accounts:employees' %}" {% if request.resolver_match.namespace == 'accounts' %}aria-current="page"{% endif %}>Employees</a>
+          <a href="{% url 'audit:log' %}" {% if request.resolver_match.namespace == 'audit' %}aria-current="page"{% endif %}>Audit log</a>
+        {% endif %}
+      </nav>
+      <form method="post" action="{% url 'accounts:logout' %}" class="logout-form">
+        {% csrf_token %}
+        <button class="text-button" type="submit">Sign out</button>
+      </form>
+    </aside>
+  {% endif %}
+
+  <main id="main-content" class="{% if request.user.is_authenticated %}app-main{% else %}auth-main{% endif %}" tabindex="-1">
+    {% if messages %}
+      <div class="messages" aria-live="polite">
+        {% for message in messages %}<div class="message {{ message.tags }}">{{ message }}</div>{% endfor %}
+      </div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+
+  {% if request.user.is_authenticated %}
+    <nav class="bottom-nav" aria-label="Mobile navigation">
+      <a href="{% url 'core:home' %}" {% if request.resolver_match.namespace == 'core' %}aria-current="page"{% endif %}>Today</a>
+      <a href="{% url 'capture:daily' %}" {% if request.resolver_match.url_name == 'daily' %}aria-current="page"{% endif %}>Daily</a>
+      <a href="{% url 'capture:inventory' %}" {% if request.resolver_match.url_name == 'inventory' %}aria-current="page"{% endif %}>Inventory</a>
+      {% if request.user.is_owner %}
+        <a href="{% url 'reconcile:owner-dashboard' %}" {% if request.resolver_match.namespace == 'reconcile' %}aria-current="page"{% endif %}>Review</a>
+      {% else %}
+        <a href="{% url 'capture:list' %}" {% if request.resolver_match.url_name == 'list' %}aria-current="page"{% endif %}>History</a>
+      {% endif %}
+    </nav>
+  {% endif %}
+</body>
+</html>

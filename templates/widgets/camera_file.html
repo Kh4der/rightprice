@@ -1,0 +1,8 @@
+<div class="camera-control" data-camera-control>
+  <input type="{{ widget.type }}" name="{{ widget.name }}"{% include "django/forms/widgets/attrs.html" %}>
+  <div class="camera-copy">
+    <strong>Take photo or choose file</strong>
+    <span data-file-name>No photo selected</span>
+  </div>
+  <div class="camera-preview" data-preview aria-hidden="true"></div>
+</div>

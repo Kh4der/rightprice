@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Sign in · Store Ops{% endblock %}
+{% block content %}
+<section class="login-panel">
+  <div class="login-intro">
+    <div class="brand login-brand"><span class="brand-mark" aria-hidden="true"></span><span>Store Ops</span></div>
+    <p class="eyebrow">Right Price Liquors</p>
+    <h1>Close the day with evidence.</h1>
+    <p>Photograph the reports, verify the numbers, and leave a clear record for the owner.</p>
+  </div>
+  <form method="post" class="form-panel" novalidate>
+    {% csrf_token %}
+    {% if request.GET.next %}<input type="hidden" name="next" value="{{ request.GET.next }}">{% endif %}
+    <div class="form-heading">
+      <p class="eyebrow">Secure access</p>
+      <h2>Employee sign in</h2>
+    </div>
+    {% if form.non_field_errors %}
+      <div class="error-summary" role="alert" tabindex="-1" data-error-summary>
+        <strong>Sign in was not successful</strong>
+        {% for error in form.non_field_errors %}<p>{{ error }}</p>{% endfor %}
+      </div>
+    {% endif %}
+    {% for field in form %}
+      <div class="field {% if field.errors %}field-error{% endif %}">
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}
+        {% for error in field.errors %}<p class="field-message" id="{{ field.id_for_label }}-error">{{ error }}</p>{% endfor %}
+      </div>
+    {% endfor %}
+    <button class="button primary full" type="submit">Sign in</button>
+    <p class="form-footnote">Five failed attempts temporarily lock that login code. Owners use a strong password; employees use their assigned PIN.</p>
+  </form>
+</section>
+{% endblock %}

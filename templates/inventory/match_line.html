@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% load store_ops %}
+{% block title %}Match inventory line · Store Ops{% endblock %}
+{% block content %}
+<header class="page-header compact">
+  <a class="back-link" href="{% url 'inventory:delivery-detail' delivery.pk %}">Back to delivery</a>
+  <p class="eyebrow">Line {{ line.position }} · Human approval required</p>
+  <h1>Choose the Square item</h1>
+  <p>The AI can suggest a match, but only an item pulled from this store’s Square catalog can be selected.</p>
+</header>
+
+<section class="section-block match-source">
+  <div><span>Invoice description</span><strong>{{ line.description }}</strong></div>
+  <div><span>Vendor SKU</span><strong>{{ line.vendor_sku|default:"Not printed" }}</strong></div>
+  <div><span>Barcode</span><strong>{{ line.upc|default:"Not printed" }}</strong></div>
+  <div><span>Pack</span><strong>{{ line.cases|default:"—" }} × {{ line.units_per_case|default:"?" }} = {{ line.received_units|default:"—" }}</strong></div>
+</section>
+
+<section class="section-block">
+  <form method="get" class="catalog-search" role="search">
+    <div class="field"><label for="{{ search_form.q.id_for_label }}">{{ search_form.q.label }}</label>{{ search_form.q }}<p class="help-text">Search using the bottle name, size, Square SKU, or UPC.</p></div>
+    <button class="button primary" type="submit">Search</button>
+  </form>
+</section>
+
+<section class="section-block">
+  <div class="section-heading"><div><p class="eyebrow">Square catalog</p><h2>{% if query %}Results for “{{ query }}”{% else %}Nearest items to review{% endif %}</h2></div><span>{{ candidates|length }} shown</span></div>
+  <div class="catalog-results">
+  {% for candidate in candidates %}
+    <article class="catalog-result">
+      <div><strong>{{ candidate.item_name|default:"Unnamed Square item" }}</strong><span>{{ candidate.variation_name|default:"Regular" }}{% if candidate.sku %} · SKU {{ candidate.sku }}{% endif %}{% if candidate.upc %} · UPC {{ candidate.upc }}{% endif %}</span><small>{{ candidate.suggestion_reason }}{% if candidate.suggestion_score %} · {{ candidate.suggestion_score }}% similarity{% endif %}</small>{% if candidate.cost_preview_cents is not None %}<small>Square cost {{ candidate.cost_preview_cents|money }} · {{ candidate.cost_preview_source }}</small>{% else %}<small>No Square cost baseline</small>{% endif %}</div>
+      <form method="post" action="{% url 'inventory:choose-match' delivery.pk line.pk %}">
+        {% csrf_token %}<input type="hidden" name="variation_id" value="{{ candidate.variation_id }}"><label class="remember-match"><input type="checkbox" name="remember_mapping" checked><span>Remember for this vendor</span></label><button class="button secondary" type="submit">Choose item</button>
+      </form>
+    </article>
+  {% empty %}
+    <div class="empty-state"><h3>No safe nearby Square item</h3><p>Try the bottle name, size, SKU, or full barcode. If it is genuinely new, use the owner-only new-item form below.</p></div>
+  {% endfor %}
+  </div>
+</section>
+
+<details class="section-block invoice-header-review">
+  <summary><span><span class="eyebrow">Only if no match exists</span><strong>Create a new Square product</strong></span><span class="text-link">Open form</span></summary>
+  <p>Search carefully first. Creating a product changes the Square catalog, but it does not update stock until the separate final inventory action.</p>
+  {% if not catalog_writes_enabled %}<div class="notice warning"><strong>New-item creation is locked</strong><p>Enable the separate catalog-write gate only after testing this flow in the Square sandbox.</p></div>{% endif %}
+  <form method="post" action="{% url 'inventory:create-catalog-item' delivery.pk line.pk %}" class="line-edit-form">
+    {% csrf_token %}
+    {% for field in new_item_form %}
+      {% if field.name == 'confirm' %}<label class="confirm-check">{{ field }}<span>{{ field.label }}</span></label>
+      {% elif field.name == 'variable_price' %}<label class="confirm-check">{{ field }}<span>{{ field.label }}</span></label>
+      {% else %}<div class="field"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% if field.help_text %}<p class="help-text">{{ field.help_text }}</p>{% endif %}</div>{% endif %}
+    {% endfor %}
+    <div class="notice neutral"><strong>Cost is kept separate</strong><p>The invoice unit cost is used for cost-change analysis. It is never copied into Square as the customer sale price.</p></div>
+    <button class="button primary" type="submit" {% if not catalog_writes_enabled %}disabled{% endif %}>Create product and match this line</button>
+  </form>
+</details>
+{% endblock %}

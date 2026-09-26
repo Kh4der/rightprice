@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · Store Ops{% endblock %}
+{% block content %}
+<header class="page-header compact">
+  <a class="back-link" href="{% url 'core:home' %}">Back to today</a>
+  <p class="eyebrow">New submission</p>
+  <h1>{{ title }}</h1>
+  <p>{{ step_hint }}</p>
+</header>
+
+<form method="post" enctype="multipart/form-data" class="capture-form" novalidate data-upload-form{% if staged_uploads_enabled %} data-stage-upload-url="{% url 'capture:stage-document' %}" data-submission-kind="{{ submission_kind }}"{% endif %}>
+  {% csrf_token %}
+  {% for hidden in form.hidden_fields %}{{ hidden }}{% endfor %}
+  {% if staged_uploads_enabled %}
+    <noscript><div class="notice warning" role="alert">Turn on JavaScript to safely upload several photos from this device.</div></noscript>
+  {% endif %}
+  {% if form.errors %}
+    <div class="error-summary" role="alert" tabindex="-1" data-error-summary>
+      <h2>Check the highlighted fields</h2>
+      <p>Nothing has been saved as a submission yet.</p>
+      {% for error in form.non_field_errors %}<p>{{ error }}</p>{% endfor %}
+      {% for hidden in form.hidden_fields %}{% for error in hidden.errors %}<p>{{ error }}</p>{% endfor %}{% endfor %}
+    </div>
+  {% endif %}
+  <div class="form-section">
+    {% for field in form.visible_fields %}
+      <div class="field {% if field.errors %}field-error{% endif %}">
+        <label for="{{ field.id_for_label }}">{{ field.label }}{% if field.field.required or field.field.staged_required %}<span class="required">Required</span>{% endif %}</label>
+        {% if field.help_text %}<p class="help-text" id="{{ field.id_for_label }}-help">{{ field.help_text }}</p>{% endif %}
+        {{ field }}
+        {% for error in field.errors %}<p class="field-message" id="{{ field.id_for_label }}-error">{{ error }}</p>{% endfor %}
+      </div>
+    {% endfor %}
+  </div>
+  <div class="sticky-actions">
+    <p class="save-note">Saved photos are kept as evidence and never overwritten.</p>
+    <p class="save-note" data-upload-status aria-live="polite"></p>
+    <button class="button primary" type="submit" data-submit-button>Save and read photos</button>
+  </div>
+</form>
+{% endblock %}

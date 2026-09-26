@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% load store_ops %}
+{% block title %}Inventory review · {{ delivery.invoice_number|default:"Delivery" }}{% endblock %}
+{% block content %}
+<header class="page-header detail-header inventory-header">
+  <div>
+    <a class="back-link" href="{% url 'capture:detail' delivery.submission_id %}">Back to evidence</a>
+    <p class="eyebrow">{{ delivery.submission.business_day }} · Inventory receiving</p>
+    <h1>{{ delivery.invoice_number|default:"Delivery review" }}</h1>
+    <p>{{ delivery.vendor.name|default:delivery.vendor_name_raw|default:"Vendor not identified" }} · {{ lines|length }} invoice line{{ lines|length|pluralize }}</p>
+  </div>
+  <span class="status large {{ delivery.status|status_class }}">{{ delivery.get_status_display }}</span>
+</header>
+
+{% if delivery.push_error %}
+  <div class="notice warning" role="status"><strong>Square needs attention</strong><p>{{ delivery.push_error }}</p></div>
+{% endif %}
+
+{% if latest_sandbox_job %}
+  <div class="notice {% if latest_sandbox_job.status == 'FAILED' %}warning{% else %}neutral{% endif %}" role="status">
+    <strong>Claude invoice reading: {{ latest_sandbox_job.get_status_display }}</strong>
+    {% if latest_sandbox_job.status == 'SUCCEEDED' %}<p>The protected result was imported as a draft. Correct unread fields below; the final Excel comes from those reviewed values.</p>
+    {% elif latest_sandbox_job.status == 'FAILED' %}<p>The original photos are safe. Processing needs attention; reference {{ latest_sandbox_job.error_code|default:"worker failure" }}.</p>
+    {% else %}<p>The employee’s original invoice photos are being processed in the isolated worker.</p>{% endif %}
+  </div>
+{% elif claude_sandbox_enabled %}
+  <div class="notice neutral" role="status"><strong>Claude invoice reading is queued</strong><p>The original photos stay protected while the background worker prepares the draft.</p></div>
+{% endif %}
+
+{% if can_edit %}
+<details class="section-block invoice-header-review" {% if not delivery.invoice_number or not delivery.invoice_date or not delivery.vendor_name_raw %}open{% endif %}>
+  <summary><span><span class="eyebrow">Invoice identity</span><strong>Confirm distributor, number, date, and total</strong></span><span class="text-link">Edit details</span></summary>
+  <form method="post" action="{% url 'inventory:header-update' delivery.pk %}" class="line-edit-form header-edit-form">
+    {% csrf_token %}{% for field in header_form %}<div class="field {% if field.errors %}field-error{% endif %}"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% for error in field.errors %}<p class="field-message">{{ error }}</p>{% endfor %}</div>{% endfor %}<div class="button-row"><button class="button secondary" type="submit">Save invoice details</button></div>
+  </form>
+</details>
+{% endif %}
+
+<section class="inventory-steps" aria-label="Square inventory update progress">
+  <div class="inventory-step {% if catalog_count %}complete{% endif %}"><span>1</span><div><strong>Square items</strong><small>{% if catalog_count %}{{ catalog_count }} available{% else %}Not pulled yet{% endif %}</small></div></div>
+  <div class="inventory-step {% if delivery.unresolved_line_count == 0 %}complete{% endif %}"><span>2</span><div><strong>Review matches</strong><small>{{ delivery.unresolved_line_count }} unresolved</small></div></div>
+  <div class="inventory-step {% if delivery.status == 'READY' or delivery.pushed_at %}complete{% endif %}"><span>3</span><div><strong>Compare counts</strong><small>{% if delivery.status == 'READY' or delivery.pushed_at %}Snapshot captured{% else %}Waiting{% endif %}</small></div></div>
+  <div class="inventory-step {% if delivery.pushed_at %}complete{% endif %}"><span>4</span><div><strong>Update and verify</strong><small>{% if delivery.pushed_at %}{{ delivery.pushed_at|date:"M j, g:i A" }}{% else %}Owner only{% endif %}</small></div></div>
+</section>
+
+{% if request.user.is_owner and show_square_toolbar %}
+<section class="section-block inventory-toolbar">
+  <div>
+    <p class="eyebrow">Square connection</p>
+    <h2>Pull the latest catalog and stock</h2>
+    <p>Catalog data finds the exact Square variation. Stock data is captured only after every included line is matched.</p>
+    {% if latest_catalog_sync %}<small>Last catalog pull {{ latest_catalog_sync|date:"M j, Y \a\t g:i A" }}</small>{% endif %}
+  </div>
+  <div class="button-row">
+    {% if can_edit %}
+    <form method="post" action="{% url 'inventory:sync-catalog' delivery.pk %}">{% csrf_token %}<button class="button secondary" type="submit">Pull Square items</button></form>
+    {% endif %}
+    {% if can_refresh_counts %}
+    <form method="post" action="{% url 'inventory:refresh-counts' delivery.pk %}">{% csrf_token %}<button class="button primary" type="submit" {% if delivery.unresolved_line_count %}disabled title="Resolve every included line first"{% endif %}>Compare live stock</button></form>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
+{% if readiness and readiness.issues %}
+<section class="notice warning" aria-labelledby="review-needed-title">
+  <strong id="review-needed-title">{{ readiness.issues|length }} review item{{ readiness.issues|length|pluralize }}</strong>
+  <ul class="issue-list">
+    {% for issue in readiness.issues|slice:":8" %}<li>{{ issue.message }}</li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="section-block flush inventory-lines-section">
+  <div class="section-heading inventory-table-heading">
+    <div><p class="eyebrow">Invoice compared with Square</p><h2>Stock changes</h2></div>
+    {% if can_export_final_workbook %}
+      <a class="button secondary" href="{% url 'inventory:export' delivery.pk %}">Download final Excel</a>
+    {% elif request.user.is_owner %}
+      <span class="button secondary disabled" aria-disabled="true" title="Finish line review, compare live Square stock, and approve the evidence first">Excel unlocks after approval</span>
+    {% endif %}
+  </div>
+  <div class="inventory-line-list">
+    {% for line, form in line_forms %}
+    <article class="inventory-line {% if not line.included %}excluded{% endif %}">
+      <div class="inventory-line-main">
+        <div class="line-position">{{ line.position|stringformat:"02d" }}</div>
+        <div class="line-identity">
+          <h3>{{ line.description|default:"Description missing" }}</h3>
+          <p>{% if line.vendor_sku %}Vendor SKU {{ line.vendor_sku }}{% endif %}{% if line.vendor_sku and line.upc %} · {% endif %}{% if line.upc %}UPC {{ line.upc }}{% endif %}</p>
+          {% if line.square_item_name %}<span class="square-match">Square: {{ line.square_item_name }}</span>{% endif %}
+          {% if line.review_note %}<small class="review-note">{{ line.review_note }}</small>{% endif %}
+        </div>
+        <div class="line-quantity"><span>Delivery adds</span><strong>{% if line.received_units is not None %}+{{ line.received_units }}{% else %}—{% endif %}</strong><small>{{ line.cases|default:"—" }} case{{ line.cases|pluralize }} × {{ line.units_per_case|default:"?" }}</small></div>
+        <div class="line-match"><span class="status {{ line.match_status|status_class }}">{{ line.get_match_status_display }}</span>{% if request.user.is_owner and can_edit and line.included %}<a class="text-link" href="{% url 'inventory:match-line' delivery.pk line.pk %}">{% if line.square_catalog_variation_id %}Change match{% else %}Find Square item{% endif %}</a>{% endif %}</div>
+      </div>
+
+      <div class="cost-comparison" aria-label="Unit cost comparison for {{ line.description }}">
+        <div><span>Invoice unit cost</span><strong>{{ line.unit_cost_cents|money }}</strong></div>
+        <div><span>Square baseline</span><strong>{% if line.square_unit_cost_cents is not None %}{{ line.square_unit_cost_cents|money }}{% else %}No baseline{% endif %}</strong>{% if line.square_unit_cost_source %}<small>{{ line.square_unit_cost_source }}</small>{% endif %}</div>
+        <div><span>Cost change</span><strong class="{% if line.unit_cost_change_percent > 0 %}cost-up{% elif line.unit_cost_change_percent < 0 %}cost-down{% endif %}">{{ line.unit_cost_change_display }}</strong>{% if line.unit_cost_change_cents is not None %}<small>{{ line.unit_cost_change_cents|money }} per bottle</small>{% endif %}</div>
+        <div><span>Invoice line total</span><strong>{{ line.line_total_cents|money }}</strong></div>
+      </div>
+
+      <div class="count-comparison" aria-label="Square inventory comparison for {{ line.description }}">
+        <div><span>Square now</span><strong>{{ line.square_count_before|default:"—" }}</strong></div>
+        <div class="comparison-operator" aria-hidden="true">+</div>
+        <div><span>{% if line.comparison_line_count > 1 %}All {{ line.comparison_line_count }} matched lines{% else %}This delivery{% endif %}</span><strong>{% if line.comparison_delta is not None %}{{ line.comparison_delta }}{% else %}—{% endif %}</strong></div>
+        <div class="comparison-operator" aria-hidden="true">=</div>
+        <div><span>Projected</span><strong>{{ line.projected_count_after|default:"—" }}</strong></div>
+        <div class="comparison-arrow" aria-hidden="true">→</div>
+        <div class="{% if line.square_count_drift %}count-drift{% endif %}"><span>Verified after</span><strong>{{ line.square_count_after|default:"—" }}</strong>{% if line.square_count_drift %}<small>Drift {{ line.square_count_drift }}</small>{% endif %}</div>
+      </div>
+
+      {% if can_edit %}
+      <details class="line-editor">
+        <summary>Correct invoice reading</summary>
+        <form method="post" action="{% url 'inventory:line-update' delivery.pk line.pk %}" class="line-edit-form">
+          {% csrf_token %}
+          {% if form.non_field_errors %}<div class="error-summary" role="alert">{{ form.non_field_errors }}</div>{% endif %}
+          {% for field in form %}<div class="field {% if field.errors %}field-error{% endif %}"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% for error in field.errors %}<p class="field-message">{{ error }}</p>{% endfor %}</div>{% endfor %}
+          <div class="button-row"><button class="button secondary" type="submit">Save corrected line</button></div>
+        </form>
+      </details>
+      {% endif %}
+    </article>
+    {% empty %}
+      <div class="empty-state"><h3>No invoice lines were found</h3><p>Add each unread line from the photographed invoice using the owner form below.</p></div>
+    {% endfor %}
+  </div>
+  {% if can_edit %}
+  <details class="line-editor add-line-editor">
+    <summary>Add a missed invoice line</summary>
+    <form method="post" action="{% url 'inventory:line-create' delivery.pk %}" class="line-edit-form">
+      {% csrf_token %}
+      {% for field in new_line_form %}<div class="field"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% if field.help_text %}<p class="help-text">{{ field.help_text }}</p>{% endif %}</div>{% endfor %}
+      <div class="button-row"><button class="button secondary" type="submit">Add line for Square matching</button></div>
+    </form>
+  </details>
+  {% endif %}
+</section>
+
+{% if request.user.is_owner and show_post_panel and not delivery.pushed_at %}
+<div class="inventory-tools">
+  <section class="section-block post-panel">
+    <p class="eyebrow">Final owner action</p><h2>Update Square inventory</h2>
+    {% if delivery.submission.status != 'APPROVED' %}
+      <div class="notice neutral"><strong>Approve evidence first</strong><p>Return to the evidence screen, record the owner decision, then come back to update Square.</p></div>
+      <a class="button secondary" href="{% url 'capture:detail' delivery.submission_id %}">Review evidence</a>
+    {% elif can_resume_push %}
+      {% if not writes_enabled %}
+        <div class="notice warning"><strong>Square updates are locked</strong><p>The original protected request is preserved, but inventory updates are disabled by configuration.</p></div>
+      {% else %}
+        <div class="notice warning"><strong>Resume the original request only</strong><p>{% if push_is_stale %}The earlier process stopped without a final receipt. {% endif %}A prior attempt may have partly reached Square. Retrying reuses the same protected request keys and will not create a second delivery.</p></div>
+        <form method="post" action="{% url 'inventory:push' delivery.pk %}" class="stack-form">
+          {% csrf_token %}<label class="confirm-check">{{ push_form.confirm }}<span>I reviewed the original projection and want to resume its protected Square request.</span></label><button class="button primary full" type="submit">Retry original Square update</button>
+        </form>
+      {% endif %}
+    {% elif delivery.status != 'READY' %}
+      <div class="notice neutral"><strong>Comparison is incomplete</strong><p>Resolve each line and compare current Square stock before updating inventory.</p></div>
+    {% elif not writes_enabled %}
+      <div class="notice warning"><strong>Square updates are locked</strong><p>Sandbox validation must be completed before inventory updates are enabled.</p></div>
+    {% else %}
+      <form method="post" action="{% url 'inventory:push' delivery.pk %}" class="stack-form">
+        {% csrf_token %}<label class="confirm-check">{{ push_form.confirm }}<span>{{ push_form.confirm.label }}</span></label><button class="button primary full" type="submit">Update {{ lines|length }} reviewed line{{ lines|length|pluralize }} in Square</button>
+      </form>
+    {% endif %}
+  </section>
+</div>
+{% endif %}
+
+{% if delivery.pushed_at %}
+<section class="section-block post-result">
+  <p class="eyebrow">Write receipt</p><h2>{{ delivery.get_status_display }}</h2>
+  <p>Updated {{ delivery.pushed_at|date:"M j, Y \a\t g:i A" }}{% if delivery.pushed_by %} by {{ delivery.pushed_by.display_name }}{% endif %}. This delivery cannot be applied twice.</p>
+</section>
+{% endif %}
+{% endblock %}

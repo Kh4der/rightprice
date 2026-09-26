@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% load store_ops %}
+{% block title %}Today · Store Ops{% endblock %}
+{% block content %}
+<header class="page-header split-header">
+  <div>
+    <p class="eyebrow">Store workflow</p>
+    <h1>What are you recording?</h1>
+    <p>Choose one job. Photos stay private and every correction remains visible.</p>
+  </div>
+  {% if request.user.is_owner %}
+    <a class="button secondary" href="{% url 'reconcile:owner-dashboard' %}">Open owner review</a>
+  {% endif %}
+</header>
+
+<section class="action-grid" aria-label="Capture actions">
+  <a class="action-tile daily" href="{% url 'capture:daily' %}">
+    <span class="action-number">01</span>
+    <span class="action-title">Daily close</span>
+    <span class="action-description">Square sales, ended drawer, and lottery reports</span>
+    <span class="action-cta">Start report</span>
+  </a>
+  <a class="action-tile payout" href="{% url 'capture:payout' %}">
+    <span class="action-number">02</span>
+    <span class="action-title">Lottery payout</span>
+    <span class="action-description">Record cash paid to a winner for owner reimbursement</span>
+    <span class="action-cta">Scan payout</span>
+  </a>
+  <a class="action-tile inventory" href="{% url 'capture:inventory' %}">
+    <span class="action-number">03</span>
+    <span class="action-title">Receive delivery</span>
+    <span class="action-description">Read an invoice and prepare reviewed Square adjustments</span>
+    <span class="action-cta">Scan invoice</span>
+  </a>
+</section>
+
+{% if request.user.is_owner and payout_summary %}
+<section class="summary-strip" aria-label="Owner summary">
+  <div><span>Waiting for review</span><strong>{{ pending_count }}</strong></div>
+  <div><span>Payouts to reimburse</span><strong>{{ payout_summary.count|default:0 }}</strong></div>
+  <div><span>Known payout amount</span><strong>{{ payout_summary.amount|money }}</strong></div>
+</section>
+{% endif %}
+
+<section class="section-block">
+  <div class="section-heading">
+    <div><p class="eyebrow">Recent activity</p><h2>Your latest submissions</h2></div>
+    <a class="text-link" href="{% url 'capture:list' %}">View all</a>
+  </div>
+  {% if recent %}
+    <div class="activity-list">
+      {% for item in recent %}
+        <a class="activity-row" href="{% url 'capture:detail' item.pk %}">
+          <span><strong>{{ item.get_kind_display }}</strong><small>{{ item.business_day }} · {{ item.submitted_by.display_name }}</small></span>
+          <span class="status {{ item.status|status_class }}">{{ item.get_status_display }}</span>
+        </a>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="empty-state"><h3>No submissions yet</h3><p>Your first photo set will appear here.</p></div>
+  {% endif %}
+</section>
+{% endblock %}

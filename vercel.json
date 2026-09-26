@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "fluid": true,
+  "functions": {
+    "config/wsgi.py": {
+      "maxDuration": 300,
+      "excludeFiles": "{tests/**,apps/**/tests/**,docs/**,design-system/**,scripts/**,compose.prod.yml,docker-compose.yml,Caddyfile,Dockerfile}"
+    },
+    "config/celery.py": {
+      "maxDuration": 300,
+      "excludeFiles": "{tests/**,apps/**/tests/**,docs/**,design-system/**,scripts/**,compose.prod.yml,docker-compose.yml,Caddyfile,Dockerfile,static/**}"
+    }
+  }
+}

@@ -1,0 +1,73 @@
+# Local DEVELOPMENT stack: the backing services only.
+#
+# Django itself runs on the host (`uv run python manage.py runserver`) so edits
+# reload instantly. The production stack — web, worker, Caddy — lives in
+# compose.prod.yml.
+#
+# Host port 5433, not 5432: this machine already runs a native Postgres service
+# on 5432 and we do not want to fight it. DATABASE_URL in .env.example matches.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: store_ops_pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: store_ops
+      POSTGRES_PASSWORD: store_ops_dev_password
+      POSTGRES_DB: store_ops
+    ports:
+      # Backing services stay on this machine. The store phone only needs the
+      # Django web port; exposing Postgres on shop Wi-Fi needlessly exposes the
+      # known development password above.
+      - '127.0.0.1:5433:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U store_ops -d store_ops']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Celery broker and result backend.
+  redis:
+    image: redis:8-alpine
+    container_name: store_ops_redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    ports:
+      - '127.0.0.1:6379:6379'
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # S3-compatible object storage, standing in for Cloudflare R2 so the upload
+  # path (presigned PUT from the phone, presigned GET for the owner) is the same
+  # code in dev and production.
+  #
+  # Not MinIO: MinIO withdrew its community container images from Docker Hub and
+  # quay.io, so minio/minio no longer pulls at all. S3Mock is a small,
+  # purpose-built S3 double that is enough for this app's storage adapter.
+  #
+  # It does NOT verify signatures — dev convenience only, never production.
+  s3:
+    image: adobe/s3mock:latest
+    container_name: store_ops_s3
+    restart: unless-stopped
+    # No bucket-seeding env vars here on purpose. This image honours neither
+    # `initialBuckets`/`INITIALBUCKETS` nor an `--initialBuckets=` argument —
+    # both were tried and it still starts with zero buckets in a temp dir.
+    # The bucket is created explicitly instead:
+    #
+    #     uv run python manage.py ensure_storage --create
+    #
+    # which also doubles as the credentials smoke test against R2 on deploy.
+    ports:
+      - '127.0.0.1:9090:9090'
+
+volumes:
+  pgdata:
+  redisdata:

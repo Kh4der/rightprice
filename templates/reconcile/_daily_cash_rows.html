@@ -1,0 +1,62 @@
+{% load store_ops %}
+<div class="daily-cash-list">
+  {% for row in cash_rows %}
+    <article id="daily-cash-{{ row.reconciliation.pk }}" class="daily-cash-row {% if row.state == 'issue' %}has-issue{% endif %}">
+      <header class="daily-cash-row-header">
+        <div>
+          <span class="daily-cash-day">{{ row.submission.business_day|date:"l, M j" }}</span>
+          <small>{{ row.submission.submitted_by.display_name }}</small>
+        </div>
+        <div class="daily-cash-status-group">
+          {% if row.is_corrected %}<span class="corrected-marker">Corrected</span>{% endif %}
+          <span class="status {{ row.state_class }}">{{ row.state_label }}</span>
+        </div>
+      </header>
+
+      <div class="daily-cash-metrics">
+        <div><span>Expected daily cash</span><strong>{{ row.expected_cents|money }}</strong><small>All cash in register {{ row.reconciliation.counted_cash_cents|money }} − drawer float {{ row.drawer_float_cents|money }}</small></div>
+        <div><span>Owner counted</span><strong>{{ row.counted_cents|money }}</strong><small>{% if row.reconciliation.collection_recorded_at %}{{ row.reconciliation.collection_recorded_at|date:"M j · g:i A" }}{% else %}Not counted yet{% endif %}</small></div>
+        <div><span>Difference</span><strong>{{ row.variance_cents|money }}</strong><small>{{ row.state_label }}</small></div>
+      </div>
+
+      <div class="daily-cash-actions">
+        <a class="text-link" href="{% url 'capture:detail' row.submission.pk %}">View daily evidence</a>
+        {% if row.can_count %}
+          <details class="daily-cash-count-editor" {% if row.state == 'waiting' or row.state == 'issue' %}open{% endif %}>
+            <summary>{% if row.counted_cents is None %}Enter daily cash{% elif row.state == 'issue' %}Re-enter count{% else %}Correct count{% endif %}</summary>
+            <form method="post" action="{% url 'reconcile:daily-cash-count' row.submission.pk %}" class="daily-cash-count-form" data-daily-cash-form data-expected-cents="{{ row.expected_cents }}">
+              {% csrf_token %}
+              <div class="field">
+                <label for="daily-cash-amount-{{ row.reconciliation.pk }}">Owner count for {{ row.submission.business_day|date:"l, M j" }}</label>
+                <div class="money-input"><span>$</span><input id="daily-cash-amount-{{ row.reconciliation.pk }}" name="amount" value="{{ row.amount_initial }}" inputmode="decimal" autocomplete="off" min="0" step="0.01" required aria-describedby="daily-cash-preview-{{ row.reconciliation.pk }}"></div>
+                <p id="daily-cash-preview-{{ row.reconciliation.pk }}" class="daily-cash-count-preview" data-daily-cash-preview role="status" aria-atomic="true">Enter the cash physically collected for this business day.</p>
+              </div>
+              <div class="field">
+                <label for="daily-cash-note-{{ row.reconciliation.pk }}">Count note <span class="required">Optional</span></label>
+                <input id="daily-cash-note-{{ row.reconciliation.pk }}" name="note" maxlength="300" value="{{ row.reconciliation.collection_note }}" placeholder="For example: counted twice">
+              </div>
+              <button class="button {% if row.state == 'issue' %}primary{% else %}secondary{% endif %}" type="submit">{% if row.counted_cents is None %}Save daily cash{% else %}Save corrected count{% endif %}</button>
+            </form>
+          </details>
+        {% endif %}
+      </div>
+
+      {% if row.history %}
+        <details class="daily-cash-history">
+          <summary>Count history · {{ row.history|length }} entr{{ row.history|length|pluralize:"y,ies" }}</summary>
+          <div class="daily-cash-history-list">
+            {% for count in row.history %}
+              <div>
+                <span>{{ count.created_at|date:"M j, Y · g:i A" }} · {{ count.entered_by.display_name }}</span>
+                <strong>{% if count.correction_of %}{{ count.correction_of.counted_cents|money }} → {% endif %}{{ count.counted_cents|money }}</strong>
+                <small>Expected {{ count.expected_cents|money }} · Difference {{ count.variance_cents|money }}{% if count.note %} · {{ count.note }}{% endif %}</small>
+              </div>
+            {% endfor %}
+          </div>
+        </details>
+      {% endif %}
+    </article>
+  {% empty %}
+    <div class="empty-state"><h3>No daily cash in this group</h3><p>Approved daily closeouts will appear here.</p></div>
+  {% endfor %}
+</div>

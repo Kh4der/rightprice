@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% load store_ops %}
+{% block title %}Owner review · Store Ops{% endblock %}
+{% block content %}
+<header class="page-header split-header">
+  <div><p class="eyebrow">Owner workspace</p><h1>Review and reconcile</h1><p>Evidence first. Inventory changes remain separate until you explicitly post them.</p></div>
+  <a class="button secondary" href="{% url 'accounts:employees' %}">Manage employees</a>
+</header>
+<section class="summary-strip four" aria-label="Review totals">
+  <div><span>Needs attention</span><strong>{{ review_queue|length }}</strong></div>
+  <div><span>Daily cash to count</span><strong>{{ daily_cash_waiting_count }}</strong></div>
+  <div><span>Daily cash issues</span><strong>{{ daily_cash_issue_count }}</strong></div>
+  <div><span>Known reimbursement</span><strong>{{ payout_totals.known_amount|money }}</strong></div>
+</section>
+
+<section class="section-block">
+  <div class="section-heading"><div><p class="eyebrow">Action queue</p><h2>Evidence to review</h2></div></div>
+  {% if review_queue %}
+    <div class="activity-list">
+      {% for item in review_queue %}
+        <a class="activity-row" href="{% url 'capture:detail' item.pk %}">
+          <span><strong>{{ item.get_kind_display }}</strong><small>{{ item.business_day }} · {{ item.submitted_by.display_name }} · {{ item.documents.count }} photo{{ item.documents.count|pluralize }}</small></span>
+          <span class="status {{ item.status|status_class }}">{{ item.get_status_display }}</span>
+        </a>
+      {% endfor %}
+    </div>
+  {% else %}<div class="empty-state"><h3>Review queue is clear</h3><p>New submissions that need a decision will appear here.</p></div>{% endif %}
+</section>
+
+<section class="section-block">
+  <div class="section-heading">
+    <div><p class="eyebrow">Weekly owner collection</p><h2>Daily cash</h2></div>
+    <a class="button primary" href="{% url 'reconcile:daily-cash' %}">Count daily cash</a>
+  </div>
+  {% if daily_cash_attention %}
+    <div class="activity-list">
+      {% for row in daily_cash_attention %}
+        <a class="activity-row" href="{% url 'reconcile:daily-cash' %}?week={{ row.week_start|date:'Y-m-d' }}#daily-cash-{{ row.reconciliation.pk }}">
+          <span><strong>{{ row.submission.business_day|date:"l, M j" }} · {{ row.expected_cents|money }}</strong><small>{{ row.submission.submitted_by.display_name }} · {% if row.counted_cents is not None %}Owner counted {{ row.counted_cents|money }}{% else %}Awaiting the owner's count{% endif %}</small></span>
+          <span class="status {{ row.state_class }}">{{ row.state_label }}</span>
+        </a>
+      {% endfor %}
+    </div>
+  {% else %}<div class="empty-state small"><p>Every approved day's cash is counted and matched.</p></div>{% endif %}
+</section>
+
+<div class="two-column">
+  <section class="section-block">
+    <div class="section-heading"><div><p class="eyebrow">Physical cash</p><h2>Payout reimbursements</h2></div><span>{{ payout_totals.count|default:0 }} waiting</span></div>
+    {% if pending_payouts %}
+      <div class="payout-list">
+      {% for payout in pending_payouts %}
+        <article class="payout-row">
+          <div><strong>{{ payout.amount_cents|money }}</strong><span>{{ payout.submission.business_day }} · {{ payout.submission.submitted_by.display_name }}</span></div>
+          <div class="button-row compact">
+            <a class="text-link" href="{% url 'capture:detail' payout.submission_id %}">Evidence</a>
+            <form method="post" action="{% url 'reconcile:reimburse-payout' payout.pk %}">{% csrf_token %}<button class="button small secondary" type="submit" {% if payout.amount_cents is None %}disabled title="Confirm amount first"{% endif %}>Mark reimbursed</button></form>
+          </div>
+        </article>
+      {% endfor %}
+      </div>
+    {% else %}<div class="empty-state small"><p>No payouts are waiting.</p></div>{% endif %}
+  </section>
+  <section class="section-block">
+    <div class="section-heading"><div><p class="eyebrow">Square inventory</p><h2>Delivery drafts</h2></div></div>
+    {% if deliveries %}
+      <div class="activity-list">
+      {% for delivery in deliveries %}
+        <a class="activity-row" href="{% url 'inventory:delivery-detail' delivery.pk %}"><span><strong>{{ delivery.invoice_number|default:"Invoice draft" }}</strong><small>{{ delivery.submission.business_day }} · {{ delivery.submission.submitted_by.display_name }}</small></span><span class="status {{ delivery.status|status_class }}">{{ delivery.get_status_display }}</span></a>
+      {% endfor %}
+      </div>
+    {% else %}<div class="empty-state small"><p>No open deliveries.</p></div>{% endif %}
+  </section>
+</div>
+
+<section class="section-block">
+  <div class="section-heading"><div><p class="eyebrow">Recent record</p><h2>All workflows</h2></div><a class="text-link" href="{% url 'capture:list' %}">Full log</a></div>
+  <div class="activity-list compact-list">
+    {% for item in recent_days %}<a class="activity-row" href="{% url 'capture:detail' item.pk %}"><span><strong>{{ item.business_day }} · {{ item.get_kind_display }}</strong><small>{{ item.submitted_by.display_name }}</small></span><span class="status {{ item.status|status_class }}">{{ item.get_status_display }}</span></a>{% empty %}<p>No activity yet.</p>{% endfor %}
+  </div>
+</section>
+{% endblock %}

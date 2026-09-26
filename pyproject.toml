@@ -1,0 +1,114 @@
+[project]
+name = "store-ops"
+version = "0.1.0"
+description = "Liquor store daily-ops app: photograph drawer, lottery and delivery paperwork, extract with vision AI, reconcile against Square, push inventory."
+requires-python = ">=3.13"
+
+dependencies = [
+    # --- web ---
+    "django>=6.1.1,<6.2",
+    "django-htmx>=1.29.0",
+    "django-environ>=0.14.0",
+    "whitenoise>=6.12.0",
+    "gunicorn>=26.2.0",
+
+    # --- database ---
+    # psycopg 3 with the C speedups; the [pool] extra gives us a real
+    # connection pool, which matters on a small VPS.
+    "psycopg[binary,pool]>=3.3.6",
+
+    # --- Square ---
+    # NOTE: the Python SDK is published as "squareup". "square" is the Node one.
+    "squareup>=46.0.0.20260916",
+
+    # --- vision extraction ---
+    "anthropic>=1.8.0",
+    "openai>=2.30.0,<3",
+    "pydantic>=2.13.5",
+
+    # --- image handling ---
+    # pillow-heif is what lets us accept the HEIC files iPhones hand over.
+    "pillow>=12.3.0",
+    "pillow-heif>=1.8.0",
+    "opencv-python-headless>=5.0.0.93",
+    "numpy>=2.0",
+
+    # --- private document storage ---
+    "vercel>=0.10.0,<0.11",
+    "boto3>=1.43.103",
+    "django-storages>=1.14.6",
+
+    # --- auth ---
+    # Argon2 for the employee PIN hashes.
+    "argon2-cffi>=25.1.0",
+    "django-axes>=8.0.0",
+
+    # --- background jobs ---
+    # No explicit redis pin: celery's [redis] extra pulls kombu[redis], which
+    # caps redis below 6.5. Asking for redis 8.x here makes the whole tree
+    # unsatisfiable, so let celery choose its own compatible client.
+    "celery[redis]>=5.6.3",
+
+    # --- audit trail ---
+    "django-simple-history>=3.10.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-django>=4.14.0",
+    "pytest-cov>=7.0.0",
+    "factory-boy>=3.3.3",
+    "respx>=0.22.0",
+    "responses>=0.25.9",
+    "ruff>=0.16.9",
+    "django-debug-toolbar>=6.0.0",
+    "time-machine>=2.19.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+# .venv is listed explicitly, not left to ruff defaults: outside a git repo
+# there is no .gitignore to fall back on, and `ruff check --fix` will happily
+# rewrite site-packages and break the installed dependencies.
+exclude = ["*/migrations/*", ".venv", "venv", "demo_media", "staticfiles"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "DJ",   # flake8-django
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "RUF",
+]
+ignore = [
+    "E501",  # line length is handled by the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Star-imports across settings modules are the idiomatic Django layering.
+"*/settings/*.py" = ["F403", "F405"]
+# Django's Meta uses mutable class attributes (constraints, indexes, ordering)
+# by design; RUF012 would flag every model in the project.
+"*/models.py" = ["RUF012"]
+"*/migrations/*.py" = ["RUF012"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings.test"
+python_files = ["test_*.py", "*_test.py"]
+addopts = "-ra --strict-markers"
+testpaths = ["tests", "apps"]
+
+[tool.coverage.run]
+omit = ["*/migrations/*", "*/tests/*", "manage.py", "config/wsgi.py", "config/asgi.py"]
+
+[tool.vercel]
+entrypoint = "config.wsgi:application"
+
+[[tool.vercel.subscribers]]
+entrypoint = "config.celery:app"

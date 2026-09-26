@@ -1,0 +1,10 @@
+{$STORE_DOMAIN} {
+	encode zstd gzip
+
+	reverse_proxy web:8000 {
+		# Django trusts this header in production settings. Overwrite any value
+		# supplied by the client instead of forwarding an attacker-controlled one.
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+	}
+}

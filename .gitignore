@@ -1,0 +1,70 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib60/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# --- virtualenv / uv ---
+.venv/
+venv/
+env/
+.python-version
+
+# --- Django ---
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+/staticfiles/
+/mediafiles/
+# Collected static output; regenerated on deploy.
+
+# --- secrets: never commit ---
+.env*
+!.env.example
+
+# --- local photo storage (STORAGE_DRIVER=local) ---
+/storage/
+/uploads/
+
+# --- test / coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+.hypothesis/
+
+# --- tooling caches ---
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+.vercel/
+
+# --- editors / OS ---
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+*.swp
+
+# --- backups produced by scripts/backup.sh ---
+/backups/

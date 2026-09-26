@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% load store_ops %}
+{% block title %}Daily cash · Store Ops{% endblock %}
+{% block content %}
+<header class="page-header split-header daily-cash-page-header">
+  <div>
+    <a class="back-link" href="{% url 'reconcile:owner-dashboard' %}">Back to owner review</a>
+    <p class="eyebrow">Weekly owner collection</p>
+    <h1>Daily cash</h1>
+    <p>Count each business day separately. Expected daily cash equals all cash counted in the register minus the {{ drawer_float_cents|money }} drawer float.</p>
+  </div>
+  <div class="week-switcher" aria-label="Choose collection week">
+    <a class="button secondary" href="?week={{ previous_week|date:'Y-m-d' }}">Previous week</a>
+    <span>{{ week_start|date:"M j" }}–{{ week_end|date:"M j, Y" }}</span>
+    <a class="button secondary" href="?week={{ next_week|date:'Y-m-d' }}">Next week</a>
+  </div>
+</header>
+
+<section class="summary-strip four" aria-label="Selected week daily cash totals">
+  <div><span>Days ready</span><strong>{{ daily_cash_count }}</strong></div>
+  <div><span>Expected daily cash</span><strong>{{ expected_total|money }}</strong></div>
+  <div><span>Counted</span><strong>{{ counted_count }} / {{ daily_cash_count }}</strong></div>
+  <div><span>Difference for counted</span><strong>{{ counted_difference|money }}</strong></div>
+</section>
+
+{% if issue_count %}
+  <div class="notice danger" role="status"><strong>{{ issue_count }} day{{ issue_count|pluralize }} need{{ issue_count|pluralize:"s," }} another count</strong><p>The weekly difference only compares days already counted; uncounted daily cash is not treated as missing.</p></div>
+{% endif %}
+
+{% if carryover_rows %}
+<section class="section-block daily-cash-week-block">
+  <div class="section-heading"><div><p class="eyebrow">Carry-over</p><h2>Earlier daily cash needing attention</h2></div><span>{{ carryover_rows|length }}</span></div>
+  {% include "reconcile/_daily_cash_rows.html" with cash_rows=carryover_rows %}
+</section>
+{% endif %}
+
+<section class="section-block daily-cash-week-block">
+  <div class="section-heading"><div><p class="eyebrow">Selected collection week</p><h2>{{ week_start|date:"M j" }}–{{ week_end|date:"M j" }}</h2></div><span>{{ counted_count }} of {{ daily_cash_count }} counted</span></div>
+  {% include "reconcile/_daily_cash_rows.html" with cash_rows=rows %}
+</section>
+{% endblock %}
