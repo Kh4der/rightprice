@@ -7,14 +7,20 @@ from celery import shared_task
 from apps.accounts.models import User
 from apps.capture.models import SubmissionStatus
 
-from .claude_sandbox import dispatch_inventory_sandbox_job
+from .claude_sandbox import (
+    dispatch_inventory_sandbox_job,
+    ensure_live_inventory_sandbox_request,
+)
 from .models import Delivery, DeliveryStatus
 
 
 @shared_task(name="inventory.dispatch_claude_sandbox")
 def dispatch_claude_inventory_job(delivery_id: str, requested_by_id: str) -> str:
-    delivery = Delivery.objects.select_related("submission").get(pk=delivery_id)
+    delivery = Delivery.objects.select_related("submission__submitted_by").get(pk=delivery_id)
     requested_by = User.objects.get(pk=requested_by_id)
+    # Keep this outside the recovery block: a practice request is forbidden,
+    # not a failed real job, and must not mutate delivery or submission state.
+    ensure_live_inventory_sandbox_request(delivery, requested_by=requested_by)
     try:
         job = dispatch_inventory_sandbox_job(delivery, requested_by=requested_by)
     except Exception as exc:

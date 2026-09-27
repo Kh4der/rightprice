@@ -30,8 +30,8 @@ class Role(models.TextChoices):
 
 
 login_code_validator = RegexValidator(
-    regex=r"^[A-Z0-9]{2,12}$",
-    message="Login code must be 2-12 characters, uppercase letters and digits only.",
+    regex=r"^[A-Z0-9_]{2,12}$",
+    message="Login code must be 2-12 characters using letters, numbers, or an underscore.",
 )
 
 
@@ -62,9 +62,14 @@ class UserManager(BaseUserManager):
         role = extra.get("role")
         is_staff = extra.get("is_staff", False)
         is_superuser = extra.get("is_superuser", False)
+        is_demo = extra.get("is_demo", False)
 
-        if role == Role.OWNER and not is_staff:
-            raise ValueError("An owner must have is_staff=True.")
+        if role == Role.OWNER and is_demo and (is_staff or is_superuser):
+            raise ValueError("A demo owner cannot access Django administration.")
+        if role == Role.OWNER and not is_demo and not is_staff:
+            raise ValueError("A live owner must have is_staff=True.")
+        if role == Role.EMPLOYEE and is_demo:
+            raise ValueError("A demo account must use the owner role.")
         if role == Role.EMPLOYEE and (is_staff or is_superuser):
             raise ValueError("An employee cannot be staff or a superuser.")
 
@@ -89,15 +94,18 @@ class UserManager(BaseUserManager):
         role = extra.setdefault("role", Role.EMPLOYEE)
         # ``create_user(..., role=OWNER)`` existed in early project code. Keep it
         # working, but make the resulting owner internally valid.
-        extra.setdefault("is_staff", role == Role.OWNER)
+        extra.setdefault("is_staff", role == Role.OWNER and not extra.get("is_demo", False))
         extra.setdefault("is_superuser", False)
         return self._create_user(login_code, password, **extra)
 
     def create_superuser(self, login_code: str, password: str | None = None, **extra):
         password = self._password_with_legacy_pin(password, extra)
         extra.setdefault("role", Role.OWNER)
+        extra.setdefault("is_demo", False)
         extra.setdefault("is_staff", True)
         extra.setdefault("is_superuser", True)
+        if extra["is_demo"]:
+            raise ValueError("A superuser cannot be a demo account.")
         if extra["role"] != Role.OWNER:
             raise ValueError("A superuser must have role=OWNER.")
         if extra["is_staff"] is not True or extra["is_superuser"] is not True:
@@ -123,6 +131,11 @@ class User(AbstractBaseUser, PermissionsMixin):
         help_text="Shown in the app and on the owner's review screens.",
     )
     role = models.CharField(max_length=16, choices=Role.choices, default=Role.EMPLOYEE)
+    is_demo = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Keeps public practice accounts and their sample records separate from the store.",
+    )
 
     square_team_member_id = models.CharField(
         max_length=64,
@@ -155,12 +168,23 @@ class User(AbstractBaseUser, PermissionsMixin):
     class Meta:
         ordering = ["display_name"]
         constraints = [
-            # Owners need admin access; employees must never acquire either staff
-            # or superuser privileges through a bulk update or data import.
+            # Live owners need admin access. Public demo owners deliberately do
+            # not; they use the owner workflow without seeing Django admin.
             models.CheckConstraint(
                 condition=(
-                    models.Q(role=Role.OWNER, is_staff=True)
-                    | models.Q(role=Role.EMPLOYEE, is_staff=False, is_superuser=False)
+                    models.Q(role=Role.OWNER, is_demo=False, is_staff=True)
+                    | models.Q(
+                        role=Role.OWNER,
+                        is_demo=True,
+                        is_staff=False,
+                        is_superuser=False,
+                    )
+                    | models.Q(
+                        role=Role.EMPLOYEE,
+                        is_demo=False,
+                        is_staff=False,
+                        is_superuser=False,
+                    )
                 ),
                 name="role_matches_privilege_flags",
             ),

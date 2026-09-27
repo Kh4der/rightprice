@@ -11,7 +11,7 @@ from .models import Role, User
 
 class LoginForm(forms.Form):
     login_code = forms.CharField(
-        label="Employee code",
+        label="Login code",
         max_length=12,
         widget=forms.TextInput(
             attrs={"autocomplete": "username", "autocapitalize": "characters", "autofocus": True}
@@ -36,7 +36,7 @@ class LoginForm(forms.Form):
         if code and pin:
             self.user = authenticate(self.request, login_code=code, password=pin)
             if self.user is None:
-                raise ValidationError("The employee code or PIN is not correct.")
+                raise ValidationError("The login code or PIN/password is not correct.")
             if not self.user.is_active:
                 raise ValidationError("This account is inactive. Ask the owner for help.")
         return cleaned

@@ -17,6 +17,7 @@ from apps.audit.models import AuditEvent
 from apps.capture.models import SubmissionStatus
 from apps.squareapi.client import get_client
 
+from .boundaries import is_demo_inventory_request
 from .catalog import CatalogRefreshResult, refresh_catalog
 from .matching import (
     LineIssue,
@@ -187,9 +188,11 @@ def import_delivery_xlsx(
     with transaction.atomic():
         locked = (
             Delivery.objects.select_for_update(of=("self",))
-            .select_related("vendor", "submission")
+            .select_related("vendor", "submission__submitted_by")
             .get(pk=delivery.pk)
         )
+        if is_demo_inventory_request(locked, actor=actor):
+            raise DeliveryNotReady("Practice mode never edits operational inventory.")
         if locked.status in {
             DeliveryStatus.PUSHING,
             DeliveryStatus.PUSHED,
@@ -277,10 +280,14 @@ def refresh_delivery_readiness(delivery: Delivery) -> ReadinessResult:
     return result
 
 
-def refresh_square_catalog(client: object | None = None) -> CatalogRefreshResult:
+def refresh_square_catalog(
+    delivery: Delivery,
+    actor: object,
+    client: object | None = None,
+) -> CatalogRefreshResult:
     """Refresh the read-only local Square variation cache."""
 
-    return refresh_catalog(client=client)
+    return refresh_catalog(delivery, actor=actor, client=client)
 
 
 def refresh_square_counts(
@@ -290,6 +297,8 @@ def refresh_square_counts(
 ) -> CountRefreshResult:
     """Snapshot current Square counts and calculate the reviewed projection."""
 
+    if is_demo_inventory_request(delivery, actor=actor):
+        raise DeliveryNotReady("Practice mode never contacts Square.")
     square_client = client or get_client()
     with transaction.atomic():
         locked = (
@@ -380,6 +389,8 @@ def push_delivery_to_square(
 ) -> SquarePushResult:
     """Post through a committed, crash-recoverable idempotent Square request."""
 
+    if is_demo_inventory_request(delivery, actor=actor):
+        raise InventoryWritesDisabled("Practice mode never changes Square inventory.")
     if not getattr(settings, "SQUARE_INVENTORY_WRITES_ENABLED", False):
         raise InventoryWritesDisabled(
             "Square inventory writes are disabled. Enable "
@@ -460,9 +471,11 @@ def _claim_square_push(
     with transaction.atomic():
         locked = (
             Delivery.objects.select_for_update(of=("self",))
-            .select_related("vendor", "submission", "pushed_by")
+            .select_related("vendor", "submission__submitted_by", "pushed_by")
             .get(pk=delivery.pk)
         )
+        if locked.submission.submitted_by.is_demo:
+            raise InventoryWritesDisabled("Practice mode never changes Square inventory.")
         if not getattr(actor, "is_owner", False):
             raise DeliveryNotReady("Only an owner can update Square inventory.")
         if locked.submission.status != SubmissionStatus.APPROVED:

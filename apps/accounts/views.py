@@ -15,11 +15,12 @@ from .models import Role, User
 
 def login_view(request):
     if request.user.is_authenticated:
-        return redirect("core:home")
+        return redirect("demo:dashboard" if request.user.is_demo else "core:home")
     form = LoginForm(request, request.POST or None)
     if request.method == "POST" and form.is_valid():
         login(request, form.user)
-        record_event(request, "session.login", form.user)
+        if not form.user.is_demo:
+            record_event(request, "session.login", form.user)
         next_url = request.POST.get("next") or request.GET.get("next")
         if next_url and url_has_allowed_host_and_scheme(
             next_url,
@@ -27,7 +28,7 @@ def login_view(request):
             require_https=request.is_secure(),
         ):
             return redirect(next_url)
-        return redirect("core:home")
+        return redirect("demo:dashboard" if form.user.is_demo else "core:home")
     return render(request, "accounts/login.html", {"form": form})
 
 
@@ -35,7 +36,8 @@ def login_view(request):
 @require_POST
 def logout_view(request):
     user = request.user
-    record_event(request, "session.logout", user)
+    if not user.is_demo:
+        record_event(request, "session.logout", user)
     logout(request)
     return redirect("accounts:login")
 

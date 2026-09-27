@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% load store_ops %}
+{% block title %}Practice daily cash · Store Ops{% endblock %}
+{% block content %}
+<header class="page-header">
+  <a class="back-link" href="{% url 'demo:dashboard' %}">Back to practice home</a>
+  <p class="eyebrow">Practice job 1 of 3</p><h1>Count cash by day</h1>
+  <p>Use one pouch at a time. The date on the card tells you which pouch to count.</p>
+</header>
+
+<section class="cash-how-to" aria-label="How to count daily cash">
+  <div><span>1</span><strong>Choose a date</strong><small>Pick up only that day's pouch.</small></div>
+  <div><span>2</span><strong>Count the pouch</strong><small>Count the cash in your hands.</small></div>
+  <div><span>3</span><strong>Type and save</strong><small>The result says Match, Short, or Over.</small></div>
+</section>
+
+<section class="cash-date-controls" aria-label="Choose dates to show">
+  <form method="get" class="cash-date-form">
+    <div class="field"><label for="demo-cash-date">Find a sample date</label><input id="demo-cash-date" type="date" name="date" value="{{ selected_date|date:'Y-m-d' }}" min="{{ sample_week_start|date:'Y-m-d' }}" max="{{ sample_week_end|date:'Y-m-d' }}"><small>Choose a date from this one safe sample week.</small></div>
+    <button class="button primary" type="submit">Show this date</button>
+  </form>
+  <div class="week-switcher" aria-label="Sample date range"><span>Sample week: {{ sample_week_start|date:"M j" }}–{{ sample_week_end|date:"M j, Y" }}</span></div>
+</section>
+
+<section class="summary-strip four" aria-label="Practice daily cash totals">
+  <div><span>Days ready</span><strong>{{ daily_cash_count }}</strong></div>
+  <div><span>Cash to collect</span><strong>{{ expected_total|money }}</strong></div>
+  <div><span>Days entered</span><strong>{{ counted_count }} / {{ daily_cash_count }}</strong></div>
+  <div><span>Difference so far</span><strong>{{ counted_difference|money }}</strong></div>
+</section>
+{% if issue_count %}<div class="notice danger" role="status"><strong>{{ issue_count }} practice day{{ issue_count|pluralize }} need{{ issue_count|pluralize:"s," }} another count</strong><p>A Short or Over amount stays visible until you enter a correction.</p></div>{% endif %}
+
+<section class="section-block daily-cash-week-block">
+  <div class="section-heading"><div><p class="eyebrow">Sample dated pouches</p><h2>{{ week_start|date:"M j" }}–{{ week_end|date:"M j, Y" }}</h2></div><span>{{ counted_count }} of {{ daily_cash_count }} entered</span></div>
+  <div class="daily-cash-list">
+    {% for row in rows %}
+      <article id="demo-cash-{{ row.id }}" class="daily-cash-row {% if row.state == 'issue' %}has-issue{% endif %} {% if row.business_day == selected_date %}is-selected{% endif %}">
+        <header class="daily-cash-row-header"><div><span class="daily-cash-day">{{ row.business_day|date:"l, F j, Y" }}</span><small>Closed by {{ row.employee_name }}</small></div><div class="daily-cash-status-group">{% if row.is_corrected %}<span class="corrected-marker">Corrected</span>{% endif %}<span class="status {{ row.state_class }}">{{ row.state_label }}</span></div></header>
+        <div class="daily-cash-equation" aria-label="Practice cash calculation for {{ row.business_day|date:'F j, Y' }}">
+          <div><span>All cash in register</span><strong>{{ row.register_cents|money }}</strong></div><span class="cash-operator" aria-hidden="true">−</span><div><span>Leave in drawer</span><strong>{{ row.drawer_float_cents|money }}</strong></div><span class="cash-operator" aria-hidden="true">=</span><div class="cash-result"><span>Cash this pouch should have</span><strong>{{ row.expected_cents|money }}</strong></div>
+        </div>
+        <div class="daily-cash-actions demo-cash-actions">
+          <p class="demo-explanation">{{ row.explanation }}</p>
+          <div class="daily-cash-count-editor">
+            <form method="post" action="{{ row.form_action }}" class="daily-cash-count-form" data-daily-cash-form data-expected-cents="{{ row.expected_cents }}">
+              {% csrf_token %}<div class="field"><label for="demo-amount-{{ row.id }}">Cash you counted for this day</label><div class="money-input"><span>$</span><input id="demo-amount-{{ row.id }}" name="amount" value="{{ row.amount_initial }}" inputmode="decimal" min="0" step="0.01" required aria-describedby="demo-preview-{{ row.id }}"></div><p id="demo-preview-{{ row.id }}" class="daily-cash-count-preview" data-daily-cash-preview role="status" aria-atomic="true">Type the total from this date's pouch.</p></div>
+              <div class="field"><label for="demo-note-{{ row.id }}">Note <span class="required">Optional</span></label><input id="demo-note-{{ row.id }}" name="note" maxlength="300" placeholder="For example: counted twice"></div>
+              <button class="button primary" type="submit">{% if row.counted_cents is None %}Save this day's cash{% else %}Save corrected amount{% endif %}</button>
+            </form>
+          </div>
+        </div>
+        {% if row.history %}<details class="daily-cash-history"><summary>See count history · {{ row.history|length }} entr{{ row.history|length|pluralize:"y,ies" }}</summary><div class="daily-cash-history-list">{% for count in row.history %}<div><span>{{ count.created_at|date:"M j, Y · g:i A" }} · {{ count.entered_by_name }}</span><strong>{% if count.correction_of_cents is not None %}{{ count.correction_of_cents|money }} → {% endif %}{{ count.counted_cents|money }}</strong><small>Should have {{ count.expected_cents|money }} · Difference {{ count.variance_cents|money }} · {{ count.note }}</small></div>{% endfor %}</div></details>{% endif %}
+      </article>
+    {% empty %}<div class="empty-state cash-empty-state"><h3>Sample pouches need a reset</h3><p>The practice records are missing. Reset them to bring back the dated examples.</p><form method="post" action="{% url 'demo:reset' %}">{% csrf_token %}<button class="button primary" type="submit">Reset sample data</button></form></div>{% endfor %}
+  </div>
+</section>
+{% endblock %}

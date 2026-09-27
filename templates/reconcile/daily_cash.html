@@ -5,22 +5,36 @@
 <header class="page-header split-header daily-cash-page-header">
   <div>
     <a class="back-link" href="{% url 'reconcile:owner-dashboard' %}">Back to owner review</a>
-    <p class="eyebrow">Weekly owner collection</p>
-    <h1>Daily cash</h1>
-    <p>Count each business day separately. Expected daily cash equals all cash counted in the register minus the {{ drawer_float_cents|money }} drawer float.</p>
-  </div>
-  <div class="week-switcher" aria-label="Choose collection week">
-    <a class="button secondary" href="?week={{ previous_week|date:'Y-m-d' }}">Previous week</a>
-    <span>{{ week_start|date:"M j" }}–{{ week_end|date:"M j, Y" }}</span>
-    <a class="button secondary" href="?week={{ next_week|date:'Y-m-d' }}">Next week</a>
+    <p class="eyebrow">Owner cash pickup</p>
+    <h1>Count cash by day</h1>
+    <p>Keep every day's pouch separate. Type what you counted for that date, then the app checks it against the register.</p>
   </div>
 </header>
 
+<section class="cash-how-to" aria-label="How to count daily cash">
+  <div><span>1</span><strong>Choose a date</strong><small>Find the pouch for that business day.</small></div>
+  <div><span>2</span><strong>Count that pouch</strong><small>Do not mix cash from different days.</small></div>
+  <div><span>3</span><strong>Type and save</strong><small>We show Match, Short, or Over right away.</small></div>
+</section>
+
+<section class="cash-date-controls" aria-label="Choose dates to show">
+  <form method="get" class="cash-date-form">
+    <div class="field"><label for="cash-date">Find a date</label><input id="cash-date" type="date" name="date" value="{{ selected_date|date:'Y-m-d' }}" max="{{ today|date:'Y-m-d' }}"><small>We will show that dated pouch with the rest of its Monday–Sunday group.</small></div>
+    <button class="button primary" type="submit">Show this date</button>
+  </form>
+  <div class="week-switcher" aria-label="Move between date groups">
+    <a class="button secondary" href="?date={{ previous_week|date:'Y-m-d' }}">Previous 7 days</a>
+    <span>{{ week_start|date:"M j" }}–{{ week_end|date:"M j, Y" }}</span>
+    {% if next_week <= current_week %}<a class="button secondary" href="?date={{ next_week|date:'Y-m-d' }}">Next 7 days</a>{% else %}<span class="button secondary disabled" aria-disabled="true">Next 7 days</span>{% endif %}
+    {% if week_start != current_week %}<a class="text-link" href="?date={{ today|date:'Y-m-d' }}">Go to this week</a>{% endif %}
+  </div>
+</section>
+
 <section class="summary-strip four" aria-label="Selected week daily cash totals">
   <div><span>Days ready</span><strong>{{ daily_cash_count }}</strong></div>
-  <div><span>Expected daily cash</span><strong>{{ expected_total|money }}</strong></div>
-  <div><span>Counted</span><strong>{{ counted_count }} / {{ daily_cash_count }}</strong></div>
-  <div><span>Difference for counted</span><strong>{{ counted_difference|money }}</strong></div>
+  <div><span>Cash to collect</span><strong>{{ expected_total|money }}</strong></div>
+  <div><span>Days entered</span><strong>{{ counted_count }} / {{ daily_cash_count }}</strong></div>
+  <div><span>Difference so far</span><strong>{{ counted_difference|money }}</strong></div>
 </section>
 
 {% if issue_count %}
@@ -35,7 +49,7 @@
 {% endif %}
 
 <section class="section-block daily-cash-week-block">
-  <div class="section-heading"><div><p class="eyebrow">Selected collection week</p><h2>{{ week_start|date:"M j" }}–{{ week_end|date:"M j" }}</h2></div><span>{{ counted_count }} of {{ daily_cash_count }} counted</span></div>
+  <div class="section-heading"><div><p class="eyebrow">Days in this group</p><h2>{{ week_start|date:"M j" }}–{{ week_end|date:"M j, Y" }}</h2></div><span>{{ counted_count }} of {{ daily_cash_count }} entered</span></div>
   {% include "reconcile/_daily_cash_rows.html" with cash_rows=rows %}
 </section>
 {% endblock %}

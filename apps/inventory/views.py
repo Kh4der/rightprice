@@ -366,7 +366,7 @@ def export_delivery(request, pk):
 def sync_catalog(request, pk):
     delivery = _editable_delivery(request, pk)
     try:
-        result = refresh_square_catalog()
+        result = refresh_square_catalog(delivery, request.user)
         readiness = refresh_delivery_readiness(delivery)
     except Exception as exc:
         messages.error(request, _safe_square_error(exc, "Square catalog could not be refreshed."))

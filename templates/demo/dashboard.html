@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% load store_ops %}
+{% block title %}Owner practice · Store Ops{% endblock %}
+{% block content %}
+<header class="page-header split-header">
+  <div><p class="eyebrow">Safe owner practice</p><h1>Learn the owner jobs</h1><p>Choose one job below. Every number is made up, and nothing can reach the real store or Square.</p></div>
+  <form method="post" action="{% url 'demo:reset' %}">{% csrf_token %}<button class="button secondary" type="submit">Reset sample data</button></form>
+</header>
+
+<section class="demo-start-here" aria-labelledby="demo-start-title">
+  <div><p class="eyebrow">Start here</p><h2 id="demo-start-title">Three owner jobs</h2><p>You can make changes and reset the examples whenever you want.</p></div>
+  <ol>
+    <li><span>1</span><div><strong>Count each day's cash</strong><small>Open one dated pouch, count it, and type the amount.</small></div></li>
+    <li><span>2</span><div><strong>Check payouts</strong><small>Confirm which lottery cash needs to go back into the drawer.</small></div></li>
+    <li><span>3</span><div><strong>Review inventory</strong><small>Match invoice items and see the Square count before and after.</small></div></li>
+  </ol>
+</section>
+
+<section class="demo-job-grid" aria-label="Owner practice jobs">
+  <a class="demo-job-card" href="{% url 'demo:daily-cash' %}">
+    <span class="action-number">01</span><h2>Daily cash</h2><p>Enter or correct the amount in each dated pouch.</p>
+    <div class="demo-card-status"><strong>{{ waiting_cash }}</strong><span>days waiting</span><strong>{{ issue_cash }}</strong><span>issue to recount</span></div>
+    <span class="action-cta">Practice cash counting</span>
+  </a>
+  <a class="demo-job-card" href="{% url 'demo:payouts' %}">
+    <span class="action-number">02</span><h2>Lottery payouts</h2><p>See the ticket, amount, date, and reimbursement status.</p>
+    <div class="demo-card-status"><strong>{{ waiting_payouts }}</strong><span>waiting</span></div>
+    <span class="action-cta">Practice payouts</span>
+  </a>
+  <a class="demo-job-card" href="{% url 'demo:inventory' %}">
+    <span class="action-number">03</span><h2>Inventory delivery</h2><p>Compare the invoice with a simulated Square catalog and stock count.</p>
+    <div class="demo-card-status"><strong>{{ unresolved_inventory }}</strong><span>item to match</span></div>
+    <span class="action-cta">Practice inventory</span>
+  </a>
+</section>
+
+<section class="section-block">
+  <div class="section-heading"><div><p class="eyebrow">Sample team</p><h2>Who created the examples?</h2></div><span>Practice only</span></div>
+  <div class="activity-list">
+    {% for employee in state.employees %}<div class="activity-row"><span><strong>{{ employee.name }}</strong><small>Login code {{ employee.code }}</small></span><span class="status provisional">{{ employee.today }}</span></div>{% endfor %}
+  </div>
+</section>
+{% endblock %}

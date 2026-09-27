@@ -30,13 +30,13 @@
 <section class="section-block">
   <div class="section-heading">
     <div><p class="eyebrow">Weekly owner collection</p><h2>Daily cash</h2></div>
-    <a class="button primary" href="{% url 'reconcile:daily-cash' %}">Count daily cash</a>
+    <a class="button primary" href="{% url 'reconcile:daily-cash' %}">Enter cash by day</a>
   </div>
   {% if daily_cash_attention %}
     <div class="activity-list">
       {% for row in daily_cash_attention %}
         <a class="activity-row" href="{% url 'reconcile:daily-cash' %}?week={{ row.week_start|date:'Y-m-d' }}#daily-cash-{{ row.reconciliation.pk }}">
-          <span><strong>{{ row.submission.business_day|date:"l, M j" }} · {{ row.expected_cents|money }}</strong><small>{{ row.submission.submitted_by.display_name }} · {% if row.counted_cents is not None %}Owner counted {{ row.counted_cents|money }}{% else %}Awaiting the owner's count{% endif %}</small></span>
+          <span><strong>{{ row.submission.business_day|date:"l, M j, Y" }} · {{ row.expected_cents|money }}</strong><small>{{ row.submission.submitted_by.display_name }} · {% if row.counted_cents is not None %}Owner counted {{ row.counted_cents|money }}{% else %}Ready for the owner to count{% endif %}</small></span>
           <span class="status {{ row.state_class }}">{{ row.state_label }}</span>
         </a>
       {% endfor %}

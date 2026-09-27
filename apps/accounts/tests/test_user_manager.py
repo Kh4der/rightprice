@@ -99,8 +99,25 @@ def test_employee_cannot_be_created_as_staff_or_superuser():
         )
 
 
+def test_demo_account_must_be_an_owner():
+    with pytest.raises(ValueError, match="owner role"):
+        User.objects.create_user(
+            login_code="BADDEMO",
+            password="1234",
+            display_name="Bad demo employee",
+            is_demo=True,
+        )
+
+
 def test_database_constraint_rejects_privilege_escalation_via_bulk_update():
     employee = User.objects.create_user("EMP01", "1234", display_name="Employee")
 
     with pytest.raises(IntegrityError), transaction.atomic():
         User.objects.filter(pk=employee.pk).update(is_superuser=True)
+
+
+def test_database_constraint_rejects_demo_employee_via_bulk_update():
+    employee = User.objects.create_user("EMP02", "1234", display_name="Employee")
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        User.objects.filter(pk=employee.pk).update(is_demo=True)

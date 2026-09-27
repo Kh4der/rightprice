@@ -157,6 +157,10 @@ class Command(BaseCommand):
     ):
         login_code = login_code.strip().upper()
         user = User.objects.filter(login_code=login_code).first()
+        if user is not None and user.is_demo:
+            raise CommandError(
+                "Demo accounts are isolated. Use seed_demo_account to reset ADMIN_DEMO."
+            )
 
         if user is None:
             user = User(login_code=login_code)

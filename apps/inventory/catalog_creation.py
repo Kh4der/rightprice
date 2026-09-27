@@ -17,6 +17,7 @@ from apps.audit.models import AuditEvent
 from apps.capture.models import SubmissionStatus
 from apps.squareapi.client import get_client
 
+from .boundaries import is_demo_inventory_request
 from .catalog import refresh_catalog
 from .matching import normalize_description, normalize_upc, normalize_vendor_sku
 from .models import (
@@ -71,6 +72,8 @@ def create_square_catalog_item(
 ) -> CatalogCreationResult:
     """Create, cache and select one Square item using a durable request identity."""
 
+    if is_demo_inventory_request(line.delivery, actor=actor):
+        raise CatalogWritesDisabled("Practice mode never creates products in Square.")
     if not getattr(settings, "SQUARE_CATALOG_WRITES_ENABLED", False):
         raise CatalogWritesDisabled(
             "Creating Square items is disabled. Enable it only after sandbox validation."
@@ -110,7 +113,7 @@ def create_square_catalog_item(
         # A fresh, complete read prevents creating an item that already exists
         # elsewhere in this seller's Square catalog. The durable DB claim below
         # serializes competing requests made through this application.
-        refresh_catalog(client=square_client)
+        refresh_catalog(line.delivery, actor=actor, client=square_client)
 
     intent, already_created = _claim_creation(
         line=line,
@@ -168,10 +171,12 @@ def _claim_creation(
     with transaction.atomic():
         locked_line = (
             DeliveryLine.objects.select_for_update()
-            .select_related("delivery__submission")
+            .select_related("delivery__submission__submitted_by")
             .get(pk=line.pk)
         )
         delivery = locked_line.delivery
+        if delivery.submission.submitted_by.is_demo:
+            raise CatalogWritesDisabled("Practice mode never creates products in Square.")
         if delivery.status in TERMINAL_DELIVERY_STATUSES or delivery.square_batch_keys:
             raise CatalogCreationError("A new item cannot be created after Square posting starts.")
         if delivery.submission.status == SubmissionStatus.REJECTED:

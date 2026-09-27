@@ -19,6 +19,7 @@ from django.utils import timezone
 
 from apps.squareapi.client import get_client, to_rfc3339
 
+from .boundaries import is_demo_inventory_request
 from .matching import line_readiness_issues
 from .models import Delivery, DeliveryLine, LineMatchStatus
 
@@ -140,6 +141,8 @@ def send_square_batches(
 ) -> SquarePushResult:
     """Run the guarded network step.  Callers own status/audit persistence."""
 
+    if is_demo_inventory_request(delivery, actor=actor):
+        raise InventoryWritesDisabled("Practice mode never changes Square inventory.")
     if not getattr(settings, "SQUARE_INVENTORY_WRITES_ENABLED", False):
         raise InventoryWritesDisabled(
             "Square inventory writes are disabled. Enable "

@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from django.conf import settings
+from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.utils import timezone
 
@@ -64,6 +65,8 @@ def sync_daily_reconciliation(
     list/get endpoints.
     """
 
+    if reconciliation.submission.submitted_by.is_demo:
+        raise PermissionDenied("Practice mode never reads the live Square account.")
     location_id = str(getattr(settings, "SQUARE_LOCATION_ID", "") or "").strip()
     start, end = business_day_window(reconciliation.submission.business_day)
     snapshot: dict[str, Any] = {

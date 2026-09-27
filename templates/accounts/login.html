@@ -13,7 +13,7 @@
     {% if request.GET.next %}<input type="hidden" name="next" value="{{ request.GET.next }}">{% endif %}
     <div class="form-heading">
       <p class="eyebrow">Secure access</p>
-      <h2>Employee sign in</h2>
+      <h2>Sign in</h2>
     </div>
     {% if form.non_field_errors %}
       <div class="error-summary" role="alert" tabindex="-1" data-error-summary>
@@ -30,6 +30,11 @@
     {% endfor %}
     <button class="button primary full" type="submit">Sign in</button>
     <p class="form-footnote">Five failed attempts temporarily lock that login code. Owners use a strong password; employees use their assigned PIN.</p>
+    <div class="demo-login-card">
+      <div><strong>Want to learn first?</strong><span>Open a safe owner practice screen filled with sample dates, cash, payouts, and inventory.</span></div>
+      <button class="button secondary full" type="submit" formnovalidate formaction="{% url 'demo:start' %}">Open owner practice</button>
+      <small>Manual demo login: <strong>ADMIN_DEMO</strong> · <strong>RightPrice!Demo26</strong></small>
+    </div>
   </form>
 </section>
 {% endblock %}

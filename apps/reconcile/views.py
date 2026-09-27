@@ -32,13 +32,16 @@ def _week_start(day: dt.date) -> dt.date:
     return day - dt.timedelta(days=day.weekday())
 
 
-def _selected_week(request) -> dt.date:
-    requested = parse_date((request.GET.get("week") or "").strip())
-    if requested is None:
-        from apps.squareapi.client import business_day_for
+def _selected_date(request) -> dt.date:
+    from apps.squareapi.client import business_day_for
 
-        requested = business_day_for(timezone.now())
-    return _week_start(requested)
+    today = business_day_for(timezone.now())
+    requested = parse_date(
+        (request.GET.get("date") or request.GET.get("week") or "").strip()
+    )
+    if requested is None or requested > today:
+        requested = today
+    return requested
 
 
 def _format_difference(variance_cents: int) -> str:
@@ -172,8 +175,12 @@ def owner_dashboard(request):
 
 @owner_required
 def daily_cash(request):
-    week_start = _selected_week(request)
+    from apps.squareapi.client import business_day_for
+
+    selected_date = _selected_date(request)
+    week_start = _week_start(selected_date)
     week_end = week_start + dt.timedelta(days=6)
+    today = business_day_for(timezone.now())
     selected = (
         _daily_cash_queryset()
         .exclude(submission__status=SubmissionStatus.REJECTED)
@@ -207,10 +214,13 @@ def daily_cash(request):
         {
             "rows": rows,
             "carryover_rows": carryover_rows,
+            "selected_date": selected_date,
             "week_start": week_start,
             "week_end": week_end,
             "previous_week": week_start - dt.timedelta(days=7),
             "next_week": week_start + dt.timedelta(days=7),
+            "today": today,
+            "current_week": _week_start(today),
             "drawer_float_cents": DrawerFloat.cents_for(week_start),
             "daily_cash_count": len(eligible_rows),
             "counted_count": len(counted_rows),

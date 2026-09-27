@@ -7,7 +7,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.http import FileResponse, Http404, JsonResponse
@@ -95,6 +95,8 @@ def _capture_context(form, *, title, step_hint, submission_kind):
 
 
 def _queue(submission, *, force=False):
+    if submission.submitted_by.is_demo:
+        raise PermissionDenied("Practice mode never sends photos to an AI service.")
     from apps.extraction.tasks import process_submission
 
     submission.status = SubmissionStatus.QUEUED

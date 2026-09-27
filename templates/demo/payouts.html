@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% load store_ops %}
+{% block title %}Practice payouts · Store Ops{% endblock %}
+{% block content %}
+<header class="page-header"><a class="back-link" href="{% url 'demo:dashboard' %}">Back to practice home</a><p class="eyebrow">Practice job 2 of 3</p><h1>Check lottery payouts</h1><p>When an employee pays a winner from the drawer, the owner puts that amount back into the store cash.</p></header>
+<section class="cash-how-to" aria-label="How to reimburse a payout"><div><span>1</span><strong>Read the date</strong><small>Make sure you have the right day's payout.</small></div><div><span>2</span><strong>Check the ticket</strong><small>Compare the ticket number and amount.</small></div><div><span>3</span><strong>Mark reimbursed</strong><small>Only after putting the cash back.</small></div></section>
+<section class="section-block"><div class="section-heading"><div><p class="eyebrow">Sample payout ledger</p><h2>Winner cash</h2></div></div><div class="payout-list demo-payout-list">{% for payout in payouts %}<article class="payout-row"><div><strong>{{ payout.amount_cents|money }}</strong><span>{{ payout.business_day|date:"l, F j, Y" }} · Ticket {{ payout.ticket_reference }} · {{ payout.employee_name }}</span></div><div class="button-row compact">{% if payout.status == 'waiting' %}<span class="status provisional">Needs reimbursement</span><form method="post" action="{% url 'demo:payout-reimburse' payout.id %}">{% csrf_token %}<button class="button primary" type="submit">Mark cash put back</button></form>{% else %}<span class="status approved">Reimbursed</span>{% endif %}</div></article>{% endfor %}</div></section>
+{% endblock %}

@@ -25,6 +25,25 @@ See [Product status and validation](docs/product-notes.md).
 The original photographs are immutable. Extracted values are stored beside
 them, not in place of them. Monetary values are integer cents throughout.
 
+## Safe owner practice
+
+The public practice owner is an isolated, guided walkthrough for Daily cash,
+lottery payouts, and inventory review. Its dated sample records live only in
+the visitor's browser session: they never enter the real store tables and can
+never call Square, photo extraction, storage, or background jobs. Changes can
+be reset at any time from the practice home screen.
+
+Create or reset the practice login after migrations:
+
+```bash
+uv run python manage.py seed_demo_account
+```
+
+Use login code `ADMIN_DEMO` (lowercase `admin_demo` also works) and password
+`RightPrice!Demo26`, or choose **Open owner practice** on the sign-in screen.
+The account is an owner for the practice workspace only; it deliberately has
+no Django admin or operational-store access.
+
 ## Daily cash and weekly owner collection
 
 Employees keep each business day's cash separate. Daily Square evidence can be

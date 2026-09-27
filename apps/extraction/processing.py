@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from django.conf import settings
+from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.utils import timezone
 from pydantic import BaseModel
@@ -164,7 +165,9 @@ def process_submission(
     can therefore also be called after a retry.
     """
 
-    submission = Submission.objects.get(pk=submission_id)
+    submission = Submission.objects.select_related("submitted_by").get(pk=submission_id)
+    if submission.submitted_by.is_demo:
+        raise PermissionDenied("Practice mode never sends photos to an AI service.")
     document_ids = list(submission.documents.order_by("created_at").values_list("pk", flat=True))
     for document_id in document_ids:
         try:
@@ -190,8 +193,12 @@ def process_submission(
 def _claim_document(document_id: str | uuid.UUID, *, force: bool) -> tuple[Document, bool]:
     with transaction.atomic():
         document = (
-            Document.objects.select_for_update().select_related("submission").get(pk=document_id)
+            Document.objects.select_for_update()
+            .select_related("submission__submitted_by")
+            .get(pk=document_id)
         )
+        if document.submission.submitted_by.is_demo:
+            raise PermissionDenied("Practice mode never sends photos to an AI service.")
         if document.submission.is_terminal and not force:
             return document, False
         if document.status == DocumentStatus.PROCESSING and not force:

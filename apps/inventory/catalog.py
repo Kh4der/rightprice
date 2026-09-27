@@ -12,8 +12,9 @@ from django.utils import timezone
 
 from apps.squareapi.client import get_client
 
+from .boundaries import is_demo_inventory_request
 from .matching import normalize_description, normalize_upc, normalize_vendor_sku
-from .models import SquareCatalogVariation
+from .models import Delivery, SquareCatalogVariation
 
 
 class CatalogRefreshError(RuntimeError):
@@ -33,9 +34,16 @@ class CatalogRefreshResult:
         return asdict(self)
 
 
-def refresh_catalog(client: object | None = None) -> CatalogRefreshResult:
+def refresh_catalog(
+    delivery: Delivery,
+    *,
+    actor: object,
+    client: object | None = None,
+) -> CatalogRefreshResult:
     """Refresh the local cache using Square's read-only Catalog list API."""
 
+    if is_demo_inventory_request(delivery, actor=actor):
+        raise CatalogRefreshError("Practice mode never reads the live Square catalog.")
     location_id = str(getattr(settings, "SQUARE_LOCATION_ID", "") or "").strip()
     if not location_id:
         raise CatalogRefreshError("SQUARE_LOCATION_ID is not configured.")

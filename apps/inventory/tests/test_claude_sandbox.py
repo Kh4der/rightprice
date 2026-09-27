@@ -26,6 +26,7 @@ from apps.inventory.claude_protocol import (
 from apps.inventory.claude_sandbox import (
     InventorySandboxNotConfigured,
     InventorySandboxOutputError,
+    InventorySandboxStateError,
     dispatch_inventory_sandbox_job,
     ingest_inventory_sandbox_outputs,
     stage_inventory_sandbox_workspace,
@@ -41,6 +42,7 @@ from apps.inventory.models import (
     InventorySandboxJob,
     InventorySandboxJobStatus,
 )
+from apps.inventory.tasks import dispatch_claude_inventory_job
 
 
 class FakeCreateSessions:
@@ -78,6 +80,18 @@ def owner(db):
 
 
 @pytest.fixture
+def demo_owner(db):
+    return User.objects.create_user(
+        "CLAUDEDEMO",
+        "demo-password",
+        display_name="Claude Demo Owner",
+        role=Role.OWNER,
+        is_demo=True,
+        is_staff=False,
+    )
+
+
+@pytest.fixture
 def delivery_with_invoice(owner):
     submission = Submission.objects.create(
         kind=SubmissionKind.INVENTORY,
@@ -111,6 +125,33 @@ def test_dispatch_is_disabled_by_default(delivery_with_invoice, owner):
         dispatch_inventory_sandbox_job(delivery, requested_by=owner, client=FakeCreateClient())
 
     assert not InventorySandboxJob.objects.exists()
+
+
+def test_demo_owned_delivery_fails_before_direct_or_celery_claude_dispatch(
+    delivery_with_invoice,
+    owner,
+    demo_owner,
+):
+    delivery, _document = delivery_with_invoice
+    submission = delivery.submission
+    submission.submitted_by = demo_owner
+    submission.save(update_fields=["submitted_by", "updated_at"])
+    delivery.refresh_from_db()
+    client = FakeCreateClient()
+    original_delivery_status = delivery.status
+    original_submission_status = submission.status
+
+    with pytest.raises(InventorySandboxStateError, match="never sends invoice"):
+        dispatch_inventory_sandbox_job(delivery, requested_by=owner, client=client)
+    with pytest.raises(InventorySandboxStateError, match="never sends invoice"):
+        dispatch_claude_inventory_job.run(str(delivery.pk), str(owner.pk))
+
+    delivery.refresh_from_db()
+    submission.refresh_from_db()
+    assert client.sessions.calls == []
+    assert not InventorySandboxJob.objects.exists()
+    assert delivery.status == original_delivery_status
+    assert submission.status == original_submission_status
 
 
 @override_settings(

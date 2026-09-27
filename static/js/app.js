@@ -250,7 +250,7 @@
     const updatePreview = () => {
       preview.classList.remove("is-match", "has-issue", "is-invalid");
       if (!input.value.trim()) {
-        preview.textContent = "Enter the cash physically collected for this business day.";
+        preview.textContent = "Type the total from this date's pouch.";
         return;
       }
       const counted = parseMoneyCents(input.value);
@@ -262,10 +262,10 @@
       const variance = counted - expected;
       if (variance === 0) {
         preview.classList.add("is-match");
-        preview.textContent = `Matches the expected ${money(expected)}.`;
+        preview.textContent = `Match — this pouch should contain ${money(expected)}.`;
       } else {
         preview.classList.add("has-issue");
-        preview.textContent = `${variance < 0 ? "Short" : "Over"} ${money(variance)}. Save it to flag the issue, or recount and correct the value.`;
+        preview.textContent = `${variance < 0 ? "Short" : "Over"} ${money(variance)}. You can save this amount, recount, and correct it later.`;
       }
     };
 

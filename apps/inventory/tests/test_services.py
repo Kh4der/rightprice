@@ -21,6 +21,7 @@ from apps.capture.models import (
     SubmissionKind,
     SubmissionStatus,
 )
+from apps.inventory.catalog import CatalogRefreshError
 from apps.inventory.catalog_creation import (
     CatalogCreationError,
     CatalogWritesDisabled,
@@ -47,7 +48,7 @@ from apps.inventory.services import (
     refresh_square_catalog,
     refresh_square_counts,
 )
-from apps.inventory.square_gateway import build_square_batches
+from apps.inventory.square_gateway import build_square_batches, send_square_batches
 from apps.inventory.workbooks import safe_excel_text
 
 
@@ -379,7 +380,7 @@ def test_catalog_create_lost_response_reuses_protected_key(delivery, owner, sett
     assert CatalogCreationIntent.objects.get(line=line).status == "SUCCEEDED"
 
 
-def test_catalog_refresh_is_read_only_and_caches_location_data(db, settings):
+def test_catalog_refresh_is_read_only_and_caches_location_data(delivery, owner, settings):
     settings.SQUARE_LOCATION_ID = "TEST_LOCATION"
     variation = {
         "type": "ITEM_VARIATION",
@@ -412,7 +413,7 @@ def test_catalog_refresh_is_read_only_and_caches_location_data(db, settings):
     }
     client = FakeSquare(catalog=[item, variation])
 
-    result = refresh_square_catalog(client=client)
+    result = refresh_square_catalog(delivery, owner, client=client)
     cached = SquareCatalogVariation.objects.get(pk="VAR-CACHE")
 
     assert result.seen == 1
@@ -477,7 +478,7 @@ def test_matching_snapshots_square_cost_and_calculates_change(delivery):
     ],
 )
 def test_catalog_location_combines_item_and_variation_rules(
-    db, settings, item_location, variation_location, expected
+    delivery, owner, settings, item_location, variation_location, expected
 ):
     settings.SQUARE_LOCATION_ID = "TEST_LOCATION"
     variation = {
@@ -497,9 +498,56 @@ def test_catalog_location_combines_item_and_variation_rules(
         "item_data": {"name": "Location Bottle", "variations": [variation]},
     }
 
-    refresh_square_catalog(client=FakeSquare(catalog=[item, variation]))
+    refresh_square_catalog(delivery, owner, client=FakeSquare(catalog=[item, variation]))
 
     assert SquareCatalogVariation.objects.get(pk="VAR-LOCATION").present_at_location is expected
+
+
+def test_demo_owned_delivery_cannot_reach_direct_square_inventory_boundaries(
+    delivery,
+    owner,
+    settings,
+):
+    demo_owner = User.objects.create_user(
+        "SQUAREDEMO",
+        "demo-password",
+        display_name="Square Demo Owner",
+        role=Role.OWNER,
+        is_demo=True,
+        is_staff=False,
+    )
+    submission = delivery.submission
+    submission.submitted_by = demo_owner
+    submission.save(update_fields=["submitted_by", "updated_at"])
+    delivery.refresh_from_db()
+    client = FakeSquare(catalog=[], counts={"VAR-1": Decimal("10")})
+    settings.SQUARE_INVENTORY_WRITES_ENABLED = True
+    settings.SQUARE_CATALOG_WRITES_ENABLED = True
+
+    with pytest.raises(CatalogRefreshError, match="never reads"):
+        refresh_square_catalog(delivery, owner, client=client)
+    with pytest.raises(DeliveryNotReady, match="never contacts"):
+        refresh_square_counts(delivery, client=client, actor=owner)
+    with pytest.raises(InventoryWritesDisabled, match="never changes"):
+        send_square_batches(delivery, actor=owner, client=client)
+    with pytest.raises(InventoryWritesDisabled, match="never changes"):
+        push_delivery_to_square(delivery, actor=owner, client=client)
+    with pytest.raises(CatalogWritesDisabled, match="never creates"):
+        create_square_catalog_item(
+            delivery.lines.get(),
+            actor=owner,
+            item_name="Demo bottle",
+            variation_name="750 mL",
+            sale_price_cents=1299,
+            variable_price=False,
+            client=client,
+        )
+
+    assert client.catalog.calls == []
+    assert client.catalog.object.calls == []
+    assert client.inventory.count_calls == []
+    assert client.inventory.change_calls == []
+    assert not CatalogCreationIntent.objects.exists()
 
 
 def test_count_snapshot_and_verified_push(delivery, owner, settings):

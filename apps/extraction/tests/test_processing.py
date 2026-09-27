@@ -4,9 +4,10 @@ import hashlib
 
 import pytest
 from django.conf import settings
+from django.core.exceptions import PermissionDenied
 from django.core.files.base import ContentFile
 
-from apps.accounts.models import User
+from apps.accounts.models import Role, User
 from apps.capture.models import (
     Document,
     DocumentStatus,
@@ -18,6 +19,8 @@ from apps.capture.models import (
 from apps.extraction.processing import aggregate_submission_status, process_document
 from apps.extraction.providers import FakeVisionProvider, ProviderConfigurationError
 from apps.extraction.schemas import ClassifiedDocumentType, DocumentClassification, SquareDrawer
+from apps.extraction.tasks import process_document_task
+from apps.extraction.tasks import process_submission as process_submission_task
 
 FIXTURES = settings.BASE_DIR / "tests" / "fixtures" / "documents"
 
@@ -76,6 +79,18 @@ def employee(db):
     return User.objects.create_user(login_code="E7", pin="1234", display_name="Employee Seven")
 
 
+@pytest.fixture
+def demo_owner(db):
+    return User.objects.create_user(
+        login_code="AIDEMO",
+        password="demo-password",
+        display_name="AI Demo Owner",
+        role=Role.OWNER,
+        is_demo=True,
+        is_staff=False,
+    )
+
+
 def make_document(
     employee,
     *,
@@ -95,6 +110,28 @@ def make_document(
     document.file.save("drawer.jpg", ContentFile(raw), save=False)
     document.save()
     return submission, document
+
+
+@pytest.mark.django_db
+def test_demo_documents_fail_before_direct_or_celery_extraction(demo_owner):
+    submission, document = make_document(demo_owner)
+    provider = FakeVisionProvider(
+        classifications=classification(),
+        extractions={ClassifiedDocumentType.SQUARE_DRAWER_SCREEN: drawer()},
+    )
+
+    with pytest.raises(PermissionDenied, match="never sends photos"):
+        process_document(document.pk, provider=provider)
+    with pytest.raises(PermissionDenied, match="never sends photos"):
+        process_document_task.run(str(document.pk))
+    with pytest.raises(PermissionDenied, match="never sends photos"):
+        process_submission_task.run(str(submission.pk))
+
+    document.refresh_from_db()
+    submission.refresh_from_db()
+    assert provider.calls == []
+    assert document.status == DocumentStatus.UPLOADED
+    assert submission.status == SubmissionStatus.DRAFT
 
 
 @pytest.mark.django_db

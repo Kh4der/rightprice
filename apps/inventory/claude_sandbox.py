@@ -33,6 +33,7 @@ from apps.capture.models import (
 from apps.extraction.preprocess import prepare
 from apps.extraction.schemas import DeliveryInvoice
 
+from .boundaries import is_demo_inventory_request
 from .claude_protocol import (
     INPUT_DIRECTORY,
     MANAGED_AGENTS_BETA,
@@ -86,6 +87,15 @@ class InventorySandboxStateError(InventorySandboxError):
 
 class InventorySandboxOutputError(InventorySandboxError):
     """Raised when sandbox output is absent, unsafe, or schema-invalid."""
+
+
+def ensure_live_inventory_sandbox_request(delivery: Delivery, *, requested_by) -> None:
+    """Reject practice data before configuration, persistence, or network access."""
+
+    if is_demo_inventory_request(delivery, actor=requested_by):
+        raise InventorySandboxStateError(
+            "Practice mode never sends invoice evidence to an AI service."
+        )
 
 
 def _audit(
@@ -175,6 +185,7 @@ def dispatch_inventory_sandbox_job(
     opaque local job UUID and a non-sensitive workflow version.
     """
 
+    ensure_live_inventory_sandbox_request(delivery, requested_by=requested_by)
     api_key, agent_id, environment_id, max_cost_cents = _configuration()
     snapshot = _document_snapshot(delivery)
 

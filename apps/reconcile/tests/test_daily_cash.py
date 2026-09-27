@@ -406,10 +406,66 @@ def test_weekly_page_lists_daily_cash_and_totals_only_counted_days(
     assert response.context["counted_difference"] == -100
     assert response.context["issue_count"] == 1
     content = response.content.decode()
-    assert "Monday, Sep 21" in content
-    assert "Tuesday, Sep 22" in content
-    assert "Wednesday, Sep 23" in content
+    assert "Monday, September 21, 2026" in content
+    assert "Tuesday, September 22, 2026" in content
+    assert "Wednesday, September 23, 2026" in content
     assert "Monday cash" in content
     assert "Tuesday cash" in content
-    assert "Difference for counted" in content
+    assert "Difference so far" in content
     assert "-$1.00" in content
+
+
+def test_daily_cash_page_has_date_picker_equation_and_plain_entry_label(
+    client,
+    owner,
+    employee,
+):
+    make_daily(
+        employee,
+        day=dt.date(2026, 9, 23),
+        counted_cash_cents=50_000,
+    )
+    client.force_login(owner)
+
+    response = client.get(reverse("reconcile:daily-cash"), {"date": "2026-09-23"})
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert response.context["week_start"] == dt.date(2026, 9, 21)
+    assert 'id="cash-date"' in content
+    assert 'value="2026-09-23"' in content
+    assert "Wednesday, September 23, 2026" in content
+    assert "All cash in register" in content
+    assert "Leave in drawer" in content
+    assert "Cash this pouch should have" in content
+    assert "Cash you counted for this day" in content
+    assert "Save this day's cash" in content
+
+
+def test_empty_daily_cash_group_explains_how_to_make_days_appear(
+    client,
+    owner,
+):
+    client.force_login(owner)
+
+    response = client.get(reverse("reconcile:daily-cash"), {"date": "2026-09-23"})
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert "No daily reports for Sep 21" in content
+    assert "Sep 27, 2026" in content
+    assert "after an employee sends that day's report and the owner approves it" in content
+    assert "Review reports" in content
+    assert "Add a daily close" in content
+
+
+def test_future_daily_cash_date_is_clamped_to_store_week(client, owner):
+    client.force_login(owner)
+
+    response = client.get(reverse("reconcile:daily-cash"), {"date": "2099-01-01"})
+
+    assert response.status_code == 200
+    assert response.context["week_start"] <= response.context["today"]
+    assert response.context["week_end"] >= response.context["today"]
+    assert response.context["selected_date"] == response.context["today"]
+    assert 'aria-disabled="true">Next 7 days' in response.content.decode()

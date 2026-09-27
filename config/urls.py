@@ -32,6 +32,7 @@ urlpatterns = [
     path("healthz", healthz, name="healthz"),
     path("admin/", admin.site.urls),
     path("", include("apps.accounts.urls")),
+    path("", include("apps.demo.urls")),
     path("", include("apps.audit.urls")),
     path("", include("apps.capture.urls")),
     path("", include("apps.inventory.urls")),
