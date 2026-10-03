@@ -31,8 +31,11 @@ from .forms import (
     CatalogSearchForm,
     DeliveryHeaderForm,
     DeliveryLineForm,
+    DeliveryPricingRulesForm,
     NewSquareItemForm,
+    PricingProductRuleFormSet,
     SquareMatchForm,
+    SquarePriceConfirmationForm,
     SquarePushConfirmationForm,
 )
 from .matching import nearest_catalog_matches
@@ -40,10 +43,22 @@ from .models import (
     CatalogMapping,
     Delivery,
     DeliveryLine,
+    DeliveryPricingPlan,
     DeliveryStatus,
     LineMatchStatus,
+    PricingPlanStatus,
     SquareCatalogVariation,
     Vendor,
+)
+from .pricing import normalize_liquor_category
+from .pricing_gateway import (
+    CatalogPriceWriteError,
+    PricingPlanDrift,
+)
+from .pricing_service import (
+    PricingPlanError,
+    prepare_delivery_pricing,
+    push_delivery_pricing,
 )
 from .services import (
     DeliveryNotReady,
@@ -78,6 +93,7 @@ LINE_AUDIT_FIELDS = (
     "upc",
     "pack_text",
     "cases",
+    "loose_units",
     "units_per_case",
     "received_units",
     "unit_cost_cents",
@@ -114,6 +130,81 @@ def _count_refreshable_delivery(request, pk) -> Delivery:
     ):
         raise PermissionDenied("Square counts can no longer be refreshed for this delivery.")
     return delivery
+
+
+def _pricing_products(delivery: Delivery, plan: DeliveryPricingPlan | None) -> list[dict]:
+    """Return one owner-facing row per matched Square variation on the invoice."""
+
+    seen: set[str] = set()
+    ordered_ids: list[str] = []
+    fallback_names: dict[str, str] = {}
+    for line in delivery.lines.order_by("position", "id"):
+        variation_id = str(line.square_catalog_variation_id or "").strip()
+        if not line.included or line.match_status != LineMatchStatus.MATCHED or not variation_id:
+            continue
+        fallback_names.setdefault(variation_id, line.square_item_name or line.description)
+        if variation_id not in seen:
+            seen.add(variation_id)
+            ordered_ids.append(variation_id)
+
+    variations = SquareCatalogVariation.objects.in_bulk(ordered_ids)
+    assignments = plan.category_assignments if plan else {}
+    overrides = plan.product_overrides if plan else {}
+    products: list[dict] = []
+    for variation_id in ordered_ids:
+        variation = variations.get(variation_id)
+        square_category = ""
+        item_name = fallback_names.get(variation_id, variation_id)
+        current_price_cents = None
+        if variation is not None:
+            item_name = str(variation)
+            square_category = normalize_liquor_category(
+                variation.reporting_category_name,
+                variation.category_path,
+            )
+            current_price_cents = variation.current_price_cents
+        assigned_category = str(assignments.get(variation_id, "") or "")
+        products.append(
+            {
+                "variation_id": variation_id,
+                "item_name": item_name,
+                "square_category": square_category,
+                "category": assigned_category,
+                "current_price_cents": current_price_cents,
+                "markup_percent": overrides.get(variation_id),
+            }
+        )
+    return products
+
+
+def _pricing_forms(
+    delivery: Delivery,
+    plan: DeliveryPricingPlan | None,
+    *,
+    data=None,
+):
+    products = _pricing_products(delivery, plan)
+    rules_form = DeliveryPricingRulesForm(
+        data,
+        prefix="pricing-rules",
+        initial={
+            "default_markup_percent": plan.default_markup_percent if plan else None,
+        },
+        category_rules=plan.category_rules if plan else {},
+    )
+    product_formset = PricingProductRuleFormSet(
+        data,
+        prefix="pricing-products",
+        initial=[
+            {
+                "variation_id": product["variation_id"],
+                "category": product["category"],
+                "markup_percent": product["markup_percent"],
+            }
+            for product in products
+        ],
+    )
+    return products, rules_form, product_formset
 
 
 @login_required
@@ -172,6 +263,54 @@ def delivery_detail(request, pk):
         and delivery.status not in TERMINAL_DELIVERY_STATUSES
         and delivery.submission.status != SubmissionStatus.REJECTED
     )
+    pricing_plan = None
+    pricing_rules_form = None
+    pricing_product_formset = None
+    pricing_product_rows = []
+    pricing_category_fields = []
+    pricing_confirmation_form = None
+    pricing_can_edit = False
+    pricing_push_is_stale = False
+    pricing_preview_is_stale = False
+    if request.user.is_owner:
+        pricing_plan = DeliveryPricingPlan.objects.filter(delivery=delivery).first()
+        pricing_preview_is_stale = bool(
+            pricing_plan
+            and pricing_plan.frozen_payload
+            and pricing_plan.frozen_payload.get("delivery_revision")
+            != delivery.spreadsheet_revision
+        )
+        pricing_push_stale_seconds = max(
+            60,
+            int(getattr(settings, "SQUARE_CATALOG_PRICE_PUSH_STALE_SECONDS", 900)),
+        )
+        pricing_push_is_stale = bool(
+            pricing_plan
+            and pricing_plan.status == PricingPlanStatus.PUSHING
+            and pricing_plan.updated_at
+            <= timezone.now() - dt.timedelta(seconds=pricing_push_stale_seconds)
+        )
+        pricing_products, pricing_rules_form, pricing_product_formset = _pricing_forms(
+            delivery,
+            pricing_plan,
+        )
+        pricing_product_rows = list(
+            zip(pricing_products, pricing_product_formset.forms, strict=True)
+        )
+        pricing_category_fields = pricing_rules_form.category_rate_fields()
+        pricing_confirmation_form = SquarePriceConfirmationForm(
+            prefix="pricing-confirm",
+            initial={
+                "preview_hash": pricing_plan.frozen_payload_hash if pricing_plan else "",
+            },
+        )
+        pricing_can_edit = bool(
+            delivery.submission.status != SubmissionStatus.REJECTED
+            and (
+                pricing_plan is None
+                or pricing_plan.status not in {PricingPlanStatus.PUSHING, PricingPlanStatus.PUSHED}
+            )
+        )
     return render(
         request,
         "inventory/delivery_detail.html",
@@ -188,6 +327,7 @@ def delivery_detail(request, pk):
             "header_form": DeliveryHeaderForm(instance=delivery),
             "push_form": SquarePushConfirmationForm(),
             "writes_enabled": settings.SQUARE_INVENTORY_WRITES_ENABLED,
+            "price_writes_enabled": settings.SQUARE_CATALOG_PRICE_WRITES_ENABLED,
             "push_is_stale": push_is_stale,
             "can_resume_push": bool(
                 delivery.square_batch_keys
@@ -197,6 +337,20 @@ def delivery_detail(request, pk):
             "can_edit": can_edit,
             "can_refresh_counts": can_refresh_counts,
             "show_square_toolbar": can_edit or can_refresh_counts,
+            "pricing_plan": pricing_plan,
+            "pricing_rules_form": pricing_rules_form,
+            "pricing_product_formset": pricing_product_formset,
+            "pricing_product_rows": pricing_product_rows,
+            "pricing_category_fields": pricing_category_fields,
+            "pricing_confirmation_form": pricing_confirmation_form,
+            "pricing_can_edit": pricing_can_edit,
+            "pricing_push_is_stale": pricing_push_is_stale,
+            "pricing_preview_is_stale": pricing_preview_is_stale,
+            "pricing_preview_change_count": sum(
+                1
+                for row in (pricing_plan.preview_lines if pricing_plan else [])
+                if row.get("price_changed")
+            ),
             "can_export_final_workbook": bool(
                 request.user.is_owner
                 and delivery.submission.status == SubmissionStatus.APPROVED
@@ -210,17 +364,20 @@ def delivery_detail(request, pk):
 @require_POST
 def header_update(request, pk):
     delivery = _editable_delivery(request, pk)
-    form = DeliveryHeaderForm(request.POST, instance=delivery)
-    if not form.is_valid():
-        messages.error(request, _form_error_message(form))
-        return redirect("inventory:delivery-detail", pk=delivery.pk)
-
     before = {
         "vendor_name_raw": delivery.vendor_name_raw,
         "invoice_number": delivery.invoice_number,
         "invoice_date": _json_value(delivery.invoice_date),
         "invoice_total_cents": delivery.invoice_total_cents,
+        "printed_total_cases": _json_value(delivery.printed_total_cases),
+        "printed_total_loose_units": _json_value(delivery.printed_total_loose_units),
+        "printed_total_physical_units": _json_value(delivery.printed_total_physical_units),
     }
+    form = DeliveryHeaderForm(request.POST, instance=delivery)
+    if not form.is_valid():
+        messages.error(request, _form_error_message(form))
+        return redirect("inventory:delivery-detail", pk=delivery.pk)
+
     with transaction.atomic():
         delivery = form.save(commit=False)
         total = form.cleaned_data.get("invoice_total")
@@ -237,6 +394,9 @@ def header_update(request, pk):
             "invoice_number": delivery.invoice_number,
             "invoice_date": _json_value(delivery.invoice_date),
             "invoice_total_cents": delivery.invoice_total_cents,
+            "printed_total_cases": _json_value(delivery.printed_total_cases),
+            "printed_total_loose_units": _json_value(delivery.printed_total_loose_units),
+            "printed_total_physical_units": _json_value(delivery.printed_total_physical_units),
         }
         changes = {
             field: {"before": before[field], "after": after[field]}
@@ -261,12 +421,14 @@ def header_update(request, pk):
 def line_update(request, pk, line_pk):
     delivery = _editable_delivery(request, pk)
     line = get_object_or_404(DeliveryLine, delivery=delivery, pk=line_pk)
+    # ModelForm validation mutates its bound instance. Capture the persisted
+    # values first so every owner correction is represented in the audit trail.
+    before = _line_edit_snapshot(line)
     form = DeliveryLineForm(request.POST, instance=line, prefix=f"line-{line.pk}")
     if not form.is_valid():
         messages.error(request, _form_error_message(form))
         return redirect("inventory:delivery-detail", pk=delivery.pk)
 
-    before = _line_edit_snapshot(line)
     with transaction.atomic():
         line = form.save(commit=False)
         line.square_count_variation_id = ""
@@ -543,6 +705,189 @@ def create_catalog_item(request, pk, line_pk):
         messages.success(
             request,
             "New Square item created and matched. Compare live stock before updating inventory.",
+        )
+    return redirect("inventory:delivery-detail", pk=delivery.pk)
+
+
+@owner_required
+@require_POST
+def preview_prices(request, pk):
+    delivery = _visible_delivery(request, pk)
+    if delivery.submission.status == SubmissionStatus.REJECTED:
+        messages.error(request, "A rejected invoice cannot be used to update Square prices.")
+        return redirect("inventory:delivery-detail", pk=delivery.pk)
+
+    plan = DeliveryPricingPlan.objects.filter(delivery=delivery).first()
+    if plan and plan.status in {PricingPlanStatus.PUSHING, PricingPlanStatus.PUSHED}:
+        messages.error(request, "These Square prices are already being updated or were updated.")
+        return redirect("inventory:delivery-detail", pk=delivery.pk)
+
+    products, rules_form, product_formset = _pricing_forms(
+        delivery,
+        plan,
+        data=request.POST,
+    )
+    if not rules_form.is_valid() or not product_formset.is_valid():
+        messages.error(
+            request,
+            "Check the highlighted percentages and product categories, then preview again.",
+        )
+        return redirect("inventory:delivery-detail", pk=delivery.pk)
+
+    expected_ids = [product["variation_id"] for product in products]
+    submitted_ids = [form.cleaned_data["variation_id"] for form in product_formset.forms]
+    if len(submitted_ids) != len(set(submitted_ids)) or set(submitted_ids) != set(expected_ids):
+        messages.error(
+            request,
+            "The invoice products changed while this form was open. Reload and preview again.",
+        )
+        return redirect("inventory:delivery-detail", pk=delivery.pk)
+
+    category_assignments: dict[str, str] = {}
+    product_overrides: dict[str, str] = {}
+    for form in product_formset.forms:
+        variation_id = form.cleaned_data["variation_id"]
+        category = form.cleaned_data.get("category")
+        markup = form.cleaned_data.get("markup_percent")
+        if category:
+            category_assignments[variation_id] = category
+        if markup is not None:
+            product_overrides[variation_id] = str(markup)
+
+    try:
+        prepared = prepare_delivery_pricing(
+            delivery,
+            actor=request.user,
+            default_markup_percent=rules_form.cleaned_data.get("default_markup_percent"),
+            category_rules=rules_form.cleaned_category_rules(),
+            product_overrides=product_overrides,
+            category_assignments=category_assignments,
+        )
+    except PricingPlanError as exc:
+        messages.error(request, str(exc))
+        return redirect("inventory:delivery-detail", pk=delivery.pk)
+
+    record_event(
+        request,
+        "inventory.pricing_preview_saved",
+        prepared.plan,
+        {
+            "delivery_id": str(delivery.pk),
+            "revision": prepared.plan.revision,
+            "default_markup_percent": (
+                str(prepared.plan.default_markup_percent)
+                if prepared.plan.default_markup_percent is not None
+                else None
+            ),
+            "category_rules": prepared.plan.category_rules,
+            "product_override_count": len(prepared.plan.product_overrides),
+            "change_count": len(prepared.preview.updates),
+            "issue_codes": [issue.code for issue in prepared.preview.issues],
+        },
+    )
+    if prepared.blocking_issues:
+        messages.warning(
+            request,
+            (
+                f"Price preview saved, but {len(prepared.blocking_issues)} item"
+                f"{'s' if len(prepared.blocking_issues) != 1 else ''} need attention. "
+                "Nothing can be sent to Square yet."
+            ),
+        )
+    elif prepared.preview.updates:
+        messages.success(
+            request,
+            (
+                f"Preview ready for {len(prepared.preview.updates)} price"
+                f"{'s' if len(prepared.preview.updates) != 1 else ''}. "
+                "Check every old and new price below before confirming."
+            ),
+        )
+    elif prepared.preview.preview_lines:
+        messages.success(
+            request,
+            "Preview complete. Current Square prices are already equal to or higher than the calculated prices.",
+        )
+    else:
+        messages.warning(
+            request,
+            "No prices were calculated. Enter an all-products, category, or product percentage.",
+        )
+    return redirect("inventory:delivery-detail", pk=delivery.pk)
+
+
+@owner_required
+@require_POST
+def push_prices(request, pk):
+    delivery = _visible_delivery(request, pk)
+    plan = DeliveryPricingPlan.objects.filter(delivery=delivery).first()
+    if plan is None:
+        messages.error(request, "Preview the selling prices before updating Square.")
+        return redirect("inventory:delivery-detail", pk=delivery.pk)
+
+    form = SquarePriceConfirmationForm(request.POST, prefix="pricing-confirm")
+    if not form.is_valid() or form.cleaned_data["preview_hash"] != plan.frozen_payload_hash:
+        messages.error(
+            request, "This price preview changed. Review the newest prices and confirm again."
+        )
+        return redirect("inventory:delivery-detail", pk=delivery.pk)
+    if not settings.SQUARE_CATALOG_PRICE_WRITES_ENABLED:
+        messages.error(request, "Square selling-price updates are locked by configuration.")
+        return redirect("inventory:delivery-detail", pk=delivery.pk)
+
+    record_event(
+        request,
+        "inventory.square_price_update_requested",
+        plan,
+        {
+            "delivery_id": str(delivery.pk),
+            "revision": plan.revision,
+            "change_count": len(plan.frozen_payload.get("updates", [])),
+        },
+    )
+    try:
+        result = push_delivery_pricing(delivery, actor=request.user)
+    except PricingPlanDrift as exc:
+        record_event(
+            request,
+            "inventory.square_price_update_blocked",
+            plan,
+            {"reason": str(exc)[:1000], "drift": exc.to_dict()},
+        )
+        messages.error(
+            request,
+            "Square prices changed after this preview. Pull Square items and preview the prices again.",
+        )
+    except (PricingPlanError, CatalogPriceWriteError) as exc:
+        record_event(
+            request,
+            "inventory.square_price_update_blocked",
+            plan,
+            {"reason": str(exc)[:1000]},
+        )
+        messages.error(request, str(exc))
+    except Exception as exc:
+        record_event(
+            request,
+            "inventory.square_price_update_failed",
+            plan,
+            {"reason": str(exc)[:1000]},
+        )
+        messages.error(request, _safe_square_error(exc, "Square prices could not be updated."))
+    else:
+        plan.refresh_from_db()
+        record_event(
+            request,
+            "inventory.square_price_update_succeeded",
+            plan,
+            result.to_dict(),
+        )
+        messages.success(
+            request,
+            (
+                f"Updated {result.updated_count} Square selling price"
+                f"{'s' if result.updated_count != 1 else ''}."
+            ),
         )
     return redirect("inventory:delivery-detail", pk=delivery.pk)
 

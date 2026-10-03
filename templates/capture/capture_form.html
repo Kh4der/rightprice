@@ -8,6 +8,14 @@
   <p>{{ step_hint }}</p>
 </header>
 
+{% if submission_kind == 'INVENTORY' %}
+<section class="cash-how-to" aria-label="How to photograph an invoice">
+  <div><span>1</span><strong>Start at the top</strong><small>Show the distributor, invoice number, and date.</small></div>
+  <div><span>2</span><strong>Move down in order</strong><small>On a long receipt, repeat one complete product row in the next photo.</small></div>
+  <div><span>3</span><strong>Finish with the total</strong><small>Show the last product and the amount due. Use a new submission for another invoice.</small></div>
+</section>
+{% endif %}
+
 <form method="post" enctype="multipart/form-data" class="capture-form" novalidate data-upload-form{% if staged_uploads_enabled %} data-stage-upload-url="{% url 'capture:stage-document' %}" data-submission-kind="{{ submission_kind }}"{% endif %}>
   {% csrf_token %}
   {% for hidden in form.hidden_fields %}{{ hidden }}{% endfor %}

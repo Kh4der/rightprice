@@ -31,7 +31,6 @@ from apps.capture.models import (
     SubmissionStatus,
 )
 from apps.extraction.preprocess import prepare
-from apps.extraction.schemas import DeliveryInvoice
 
 from .boundaries import is_demo_inventory_request
 from .claude_protocol import (
@@ -45,6 +44,8 @@ from .claude_protocol import (
     SCHEMA_DIRECTORY,
     SCHEMA_PATH,
     WORKFLOW_VERSION,
+    SandboxDeliveryInvoiceResult,
+    SandboxInvoiceSourceIdentity,
 )
 from .models import (
     Delivery,
@@ -167,7 +168,33 @@ the Django application after owner review.
 Read every invoice page. Never guess unreadable text. Write one JSON object that validates exactly
 against the provided schema to ./{RESULT_JSON_PATH}. Also write a values-only XLSX review workbook
 to ./{RESULT_XLSX_PATH}; it must contain no formulas, macros, external links, or hidden worksheets.
-Include every extracted invoice line and make unreadable/absent fields visibly clear for owner
+The JSON source_documents list must contain exactly one entry for every document_id in the manifest.
+Read each source's vendor, invoice number, and invoice date independently from that source's visible
+text; use absent/unreadable evidence when a cropped continuation does not show an identity field.
+Never copy an identity inferred from another photo into a source entry.
+The input files may be overlapping photographs of one long receipt, not separate pages. Reconstruct
+them top-to-bottom and include each physically printed product row exactly once. Use repeated rows
+at crop boundaries only to align the photos; never add their quantities twice. If legible headers
+show different invoice numbers, vendors, or invoice dates, stop without producing outputs so the
+owner must submit each invoice separately.
+
+For CASES/BTL or CS/BT, the first number is cases received and the second is loose bottles/cans.
+BPC/QPC is physical containers per case and SIZE is the bottle/can size. Write pack_text like
+12/750ML or 6/1.75L. Preserve nested consumer packs such as 2/12pk as 2/12/355ML so the application
+requires an owner-reviewed Square selling unit instead of assuming 24 singles. On Southern-style
+rows, use ITEM# as vendor_sku, the digits under the barcode as UPC, the lower per-bottle net amount
+as unit cost, and TOTAL as line total. On Johnson-style rows, use PROD# as vendor_sku, NET-BT only
+when it matches the sellable unit, and EXTENDED as line total. Keep leading UPC zeroes.
+
+Rows printed 0/0 with BACKORDERED, REORDER, NOT SHIPPED, or zero received quantity are evidence but
+not received inventory. Include them with zero quantities and the printed status text in description
+so the application retains and excludes them; never turn them into positive stock. Do not turn deal
+notes, service charges, deposits, freight, signatures, or footer totals into product lines. Include
+every unique extracted invoice line. Copy independent final-footer quantity totals when printed:
+TOTAL CASES or the case side of TOTAL CS/BTLS is printed_total_cases; TOTAL BOT or the loose-bottle
+side of TOTAL CS/BTLS is printed_total_loose_units; TOTAL BOTTLES is
+printed_total_physical_units. Do not calculate or invent these footer fields, and mark them absent
+when a crop or invoice does not show them. Make unreadable/absent fields visibly clear for owner
 correction. These two exact output paths are the only deliverables accepted by the application.
 """
 
@@ -355,7 +382,11 @@ def stage_inventory_sandbox_workspace(
             )
 
         (workspace / SCHEMA_PATH).write_text(
-            json.dumps(DeliveryInvoice.model_json_schema(), indent=2, sort_keys=True),
+            json.dumps(
+                SandboxDeliveryInvoiceResult.model_json_schema(),
+                indent=2,
+                sort_keys=True,
+            ),
             encoding="utf-8",
         )
         sandbox_manifest = {
@@ -429,8 +460,7 @@ def _validate_values_only_xlsx(data: bytes) -> None:
             if len(names) != len(set(names)):
                 raise InventorySandboxOutputError("The sandbox workbook has duplicate ZIP entries.")
             if any(
-                name.startswith("/") or ".." in Path(name).parts or "\x00" in name
-                for name in names
+                name.startswith("/") or ".." in Path(name).parts or "\x00" in name for name in names
             ):
                 raise InventorySandboxOutputError("The sandbox workbook contains an unsafe path.")
             lowered = [name.lower() for name in names]
@@ -472,9 +502,89 @@ def _validate_values_only_xlsx(data: bytes) -> None:
     except InventorySandboxOutputError:
         raise
     except (RuntimeError, zipfile.BadZipFile) as exc:
+        raise InventorySandboxOutputError("The sandbox workbook is not a valid XLSX file.") from exc
+
+
+def _normalized_source_identity(value: Any) -> str:
+    """Normalize only presentation differences, never fuzzy-match identities."""
+
+    return " ".join(str(value).split()).strip().casefold().replace("\u2019", "'")
+
+
+def _validate_source_invoice_identities(
+    job: InventorySandboxJob,
+    result: SandboxDeliveryInvoiceResult,
+) -> None:
+    """Reject incomplete or conflicting per-photo invoice identities.
+
+    The aggregate extraction cannot prove that every uploaded photo belongs to
+    it.  Requiring a separately evidenced identity entry for each immutable
+    document lets the trusted host detect mixed invoice headers before any
+    draft lines or document results are stored.
+    """
+
+    snapshots = job.input_manifest.get("documents", [])
+    if not isinstance(snapshots, list) or not snapshots:
+        raise InventorySandboxOutputError("The job has no trusted invoice source list.")
+    expected_ids = [str(snapshot.get("document_id", "")) for snapshot in snapshots]
+    if any(not document_id for document_id in expected_ids) or len(expected_ids) != len(
+        set(expected_ids)
+    ):
+        raise InventorySandboxOutputError("The job has an invalid invoice source list.")
+
+    sources_by_id: dict[str, SandboxInvoiceSourceIdentity] = {}
+    for source in result.source_documents:
+        document_id = str(source.document_id)
+        if document_id in sources_by_id:
+            raise InventorySandboxOutputError("The sandbox repeated an invoice source identity.")
+        sources_by_id[document_id] = source
+
+    expected = set(expected_ids)
+    observed = set(sources_by_id)
+    if observed != expected:
         raise InventorySandboxOutputError(
-            "The sandbox workbook is not a valid XLSX file."
-        ) from exc
+            "The sandbox must return one identity entry for every invoice photo."
+        )
+
+    labels = {
+        "vendor_name": "vendor",
+        "invoice_number": "invoice number",
+        "invoice_date": "invoice date",
+    }
+    values: dict[str, set[str]] = {field: set() for field in labels}
+    for source in sources_by_id.values():
+        for field in labels:
+            value = getattr(source, field).value
+            if value is not None:
+                normalized = _normalized_source_identity(value)
+                if normalized:
+                    values[field].add(normalized)
+
+    conflicts = [labels[field] for field, found in values.items() if len(found) > 1]
+    if conflicts:
+        raise InventorySandboxOutputError(
+            "Uploaded photos identify different invoices ("
+            + ", ".join(conflicts)
+            + "). Submit each invoice separately."
+        )
+
+    # Invoice number is the strongest routinely printed invoice identity. If
+    # no photo visibly supports it, automatic aggregation is unsafe; preserve
+    # the originals for owner review instead of accepting a model-level guess.
+    if not values["invoice_number"]:
+        raise InventorySandboxOutputError(
+            "No invoice photo contains a legible invoice number for automatic processing."
+        )
+
+    for field, label in labels.items():
+        aggregate_value = getattr(result, field).value
+        if aggregate_value is None:
+            continue
+        normalized = _normalized_source_identity(aggregate_value)
+        if not values[field] or normalized not in values[field]:
+            raise InventorySandboxOutputError(
+                f"The aggregate {label} is not supported by a source photo."
+            )
 
 
 def ingest_inventory_sandbox_outputs(
@@ -503,7 +613,8 @@ def ingest_inventory_sandbox_outputs(
         raw_result = json.loads(
             _read_limited(result_path, settings.CLAUDE_INVENTORY_MAX_RESULT_JSON_BYTES)
         )
-        result = DeliveryInvoice.model_validate(raw_result)
+        result = SandboxDeliveryInvoiceResult.model_validate(raw_result)
+        _validate_source_invoice_identities(job, result)
 
         workbook_path = _safe_output_file(workspace, RESULT_XLSX_PATH)
         workbook = _read_limited(workbook_path, settings.CLAUDE_INVENTORY_MAX_WORKBOOK_BYTES)
@@ -557,42 +668,71 @@ def ingest_inventory_sandbox_outputs(
 
 def _apply_sandbox_result_to_delivery(
     job: InventorySandboxJob,
-    result: DeliveryInvoice,
+    result: SandboxDeliveryInvoiceResult,
 ) -> bool:
     """Seed an untouched delivery draft; never overwrite owner-corrected rows."""
 
-    result_payload = result.model_dump(mode="json")
     with transaction.atomic():
         delivery = (
             Delivery.objects.select_for_update()
             .select_related("submission")
             .get(pk=job.delivery_id)
         )
-        if delivery.status in {
-            DeliveryStatus.PUSHING,
-            DeliveryStatus.PUSHED,
-            DeliveryStatus.PUSHED_WITH_DRIFT,
-            DeliveryStatus.PUSHED_UNVERIFIED,
-        } or delivery.square_batch_keys:
+        if (
+            delivery.status
+            in {
+                DeliveryStatus.PUSHING,
+                DeliveryStatus.PUSHED,
+                DeliveryStatus.PUSHED_WITH_DRIFT,
+                DeliveryStatus.PUSHED_UNVERIFIED,
+            }
+            or delivery.square_batch_keys
+        ):
             raise InventorySandboxStateError(
                 "Claude output cannot replace a delivery after Square posting starts."
             )
 
-        documents = delivery.submission.documents.filter(
-            requested_type__in=[DocumentType.AUTO, DocumentType.DELIVERY_INVOICE]
+        documents = list(
+            delivery.submission.documents.filter(
+                requested_type__in=[DocumentType.AUTO, DocumentType.DELIVERY_INVOICE]
+            )
         )
-        documents.update(
-            detected_type=DocumentType.DELIVERY_INVOICE,
-            status=DocumentStatus.EXTRACTED,
-            extracted_data={
-                "schema_version": 1,
+        source_identities = {
+            str(source.document_id): source.model_dump(mode="json")
+            for source in result.source_documents
+        }
+        if {str(document.id) for document in documents} != set(source_identities):
+            raise InventorySandboxStateError(
+                "The delivery's invoice photo set changed while Claude was processing it."
+            )
+        for document in documents:
+            source = source_identities[str(document.id)]
+            # Keep each Document's ``result`` source-specific. Readiness checks
+            # deliberately compare these identities; copying the aggregate
+            # header to every photo would hide a mixed-invoice upload.
+            document.detected_type = DocumentType.DELIVERY_INVOICE
+            document.status = DocumentStatus.EXTRACTED
+            document.extracted_data = {
+                "schema_version": 3,
                 "provider": "claude_managed_agents_self_hosted",
                 "sandbox_job_id": str(job.id),
-                "result": result_payload,
-            },
-            check_results=[],
-            processing_error="",
-        )
+                "result": {
+                    "vendor_name": source["vendor_name"],
+                    "invoice_number": source["invoice_number"],
+                    "invoice_date": source["invoice_date"],
+                },
+            }
+            document.check_results = []
+            document.processing_error = ""
+            document.save(
+                update_fields=[
+                    "detected_type",
+                    "status",
+                    "extracted_data",
+                    "check_results",
+                    "processing_error",
+                ]
+            )
 
         # A normal extraction may have won a race, or the owner may already
         # have corrected lines. Keep those rows authoritative.
@@ -608,6 +748,9 @@ def _apply_sandbox_result_to_delivery(
             delivery.invoice_number = str(result.invoice_number.value or "").strip()[:100]
             delivery.invoice_date = result.invoice_date.value
             delivery.invoice_total_cents = result.invoice_total_cents.value
+            delivery.printed_total_cases = result.printed_total_cases.value
+            delivery.printed_total_loose_units = result.printed_total_loose_units.value
+            delivery.printed_total_physical_units = result.printed_total_physical_units.value
             delivery.status = DeliveryStatus.NEEDS_REVIEW
             delivery.save(
                 update_fields=[
@@ -616,6 +759,9 @@ def _apply_sandbox_result_to_delivery(
                     "invoice_number",
                     "invoice_date",
                     "invoice_total_cents",
+                    "printed_total_cases",
+                    "printed_total_loose_units",
+                    "printed_total_physical_units",
                     "status",
                     "updated_at",
                 ]
@@ -644,6 +790,7 @@ def _apply_sandbox_result_to_delivery(
                         description=description,
                         pack_text=str(source.pack_text.value or "").strip()[:80],
                         cases=source.cases.value,
+                        loose_units=source.loose_units.value,
                         received_units=source.stated_units.value,
                         unit_cost_cents=source.unit_cost_cents.value,
                         line_total_cents=source.line_total_cents.value,

@@ -59,6 +59,46 @@ Rules:
 """.strip()
 
 
+DELIVERY_INVOICE_EXTRACTION_PROMPT = """
+Additional rules for a delivery invoice or scan sheet:
+- A photo may be one overlapping section of a long receipt. Extract only rows
+  whose product identity, received quantity, pack, and amount are fully visible
+  in this photo. Do not complete a row cut off by the top or bottom edge.
+- CASES or the first number in CS/BT is cases actually received. BTL/BT or the
+  second number is loose bottles/cans received. A line explicitly printed with
+  zero received quantity and BACKORDERED, REORDER, or NOT SHIPPED did not arrive.
+  Keep that product row in `lines` with its printed zero quantities and status
+  text so the application can retain the evidence and exclude it from stock.
+  Never use a zero price or zero total alone to decide that a product did not
+  arrive; a free or fully discounted product can still have positive quantity.
+- BPC and QPC mean physical containers per case. Combine that count with SIZE
+  as pack_text: BPC 12 and SIZE 750ML becomes `12/750ML`. Preserve a nested
+  consumer pack: QPC 24 plus `2/12pk` and 355ML becomes `2/12/355ML`, not a
+  guessed 24 sellable Square units.
+- For Johnson-style columns, PROD# is vendor_sku, NET-BT is the printed net
+  physical-bottle cost, NET-PR is net case price, and EXTENDED is line total.
+- For Southern-style rows, ITEM# is vendor_sku; BPC and SIZE form pack_text.
+  The upper UNIT AMOUNT is normally net case amount and the lower repeated
+  UNIT AMOUNT is net bottle amount. TOTAL is the extended line amount.
+- Read UPC from the digits below the barcode and keep its leading zeroes.
+- `loose_units` is only the printed BTL/BT quantity. `stated_units` is the total
+  received inventory quantity. Derive stated_units only when all supporting
+  case, loose-unit, and pack figures are completely legible; put those exact
+  snippets in verbatim. If a nested multipack makes the store's sellable unit
+  ambiguous, leave stated_units and unit_cost_cents absent for owner review.
+- Use the discounted/net cost, never list price. A printed per-bottle cost may
+  be rounded, so copy it rather than changing the printed extended total.
+- Copy independent final-footer quantity totals when visible: TOTAL CASES or
+  the case side of TOTAL CS/BTLS is `printed_total_cases`; TOTAL BOT or the
+  loose side is `printed_total_loose_units`; and TOTAL BOTTLES is
+  `printed_total_physical_units`. Never calculate these fields or copy them
+  from a cropped page that does not visibly show the footer.
+- Do not turn service charges, deposits, freight, standalone deal/backorder
+  notes, signatures, or invoice footer totals into product lines. A backorder
+  status attached to a real product row stays on that product row.
+""".strip()
+
+
 class ExtractionProviderError(RuntimeError):
     """Base error for a provider that cannot return a validated result."""
 
@@ -150,11 +190,14 @@ class OpenAIVisionProvider:
             raise ValueError(
                 f"{document_type.value} requires {expected.__name__}, not {schema.__name__}"
             )
+        prompt = EXTRACTION_PROMPT
+        if document_type is ClassifiedDocumentType.DELIVERY_INVOICE:
+            prompt = f"{prompt}\n\n{DELIVERY_INVOICE_EXTRACTION_PROMPT}"
         return self._parse(
             image=image,
             media_type=media_type,
             model=self.extraction_model,
-            prompt=EXTRACTION_PROMPT,
+            prompt=prompt,
             schema=schema,
             task=f"Extract only the {document_type.value} document.",
         )

@@ -71,6 +71,7 @@ def test_process_submission_materializes_delivery_without_guessing_catalog_match
                     "description": evidence("Example Vodka 750ML"),
                     "pack_text": evidence("12/750ML"),
                     "cases": evidence("2"),
+                    "loose_units": evidence("0"),
                     "stated_units": evidence("24"),
                     "unit_cost_cents": evidence(500),
                     "line_total_cents": evidence(12_000),
@@ -82,6 +83,7 @@ def test_process_submission_materializes_delivery_without_guessing_catalog_match
                     "description": evidence("Bottle deposit"),
                     "pack_text": evidence(""),
                     "cases": evidence("1"),
+                    "loose_units": evidence("0"),
                     "stated_units": evidence("1"),
                     "unit_cost_cents": evidence(500),
                     "line_total_cents": evidence(500),
@@ -100,6 +102,7 @@ def test_process_submission_materializes_delivery_without_guessing_catalog_match
     assert delivery.invoice_date == dt.date(2026, 9, 26)
     assert delivery.invoice_total_cents == 12_500
     assert lines[0].upc == "012345678905"
+    assert lines[0].loose_units == 0
     assert lines[0].match_status == LineMatchStatus.UNMATCHED
     assert lines[1].match_status == LineMatchStatus.EXCLUDED
     assert not lines[1].included
@@ -111,6 +114,153 @@ def test_process_submission_materializes_delivery_without_guessing_catalog_match
     process_submission(submission.pk)
     lines[0].refresh_from_db()
     assert lines[0].square_catalog_variation_id == "variation-reviewed"
+
+
+def invoice_line(
+    sku,
+    *,
+    position,
+    cases,
+    loose_units,
+    received_units,
+    total_cents,
+    description=None,
+    upc=None,
+    pack_text="12/750ML",
+):
+    return {
+        "line_number": evidence(position),
+        "vendor_sku": evidence(sku),
+        "upc": evidence(upc or f"0123456789{position:02d}"),
+        "description": evidence(description or f"Product {sku} 750ML"),
+        "pack_text": evidence(pack_text),
+        "cases": evidence(str(cases)),
+        "loose_units": evidence(str(loose_units)),
+        "stated_units": evidence(str(received_units)),
+        "unit_cost_cents": evidence(500),
+        "line_total_cents": evidence(total_cents),
+    }
+
+
+def invoice_page(lines, *, invoice_number="INV-LONG"):
+    return {
+        "vendor_name": evidence("Southern Distributor"),
+        "invoice_number": evidence(invoice_number),
+        "invoice_date": evidence("2026-09-26"),
+        "lines": lines,
+    }
+
+
+@pytest.mark.django_db
+def test_overlapping_long_receipt_rows_are_materialized_once(employee):
+    submission = Submission.objects.create(kind=SubmissionKind.INVENTORY, submitted_by=employee)
+    row_a = invoice_line(
+        "SKU-A", position=1, cases=1, loose_units=0, received_units=12, total_cents=6000
+    )
+    row_b = invoice_line(
+        "SKU-B", position=2, cases=2, loose_units=0, received_units=24, total_cents=12000
+    )
+    row_c = invoice_line(
+        "SKU-C", position=3, cases=1, loose_units=2, received_units=14, total_cents=7000
+    )
+    extracted_document(
+        submission,
+        DocumentType.DELIVERY_INVOICE,
+        invoice_page([row_a, row_b]),
+        index=1,
+    )
+    extracted_document(
+        submission,
+        DocumentType.DELIVERY_INVOICE,
+        {
+            **invoice_page([row_b, row_c]),
+            "printed_total_cases": evidence("4"),
+            "printed_total_loose_units": evidence("2"),
+            "printed_total_physical_units": evidence("50"),
+        },
+        index=2,
+    )
+
+    materialize_submission(submission)
+
+    lines = list(submission.delivery.lines.order_by("position"))
+    assert [line.vendor_sku for line in lines] == ["SKU-A", "SKU-B", "SKU-C"]
+    assert lines[-1].loose_units == 2
+    assert lines[-1].received_units == 14
+    assert submission.delivery.printed_total_cases == 4
+    assert submission.delivery.printed_total_loose_units == 2
+    assert submission.delivery.printed_total_physical_units == 50
+
+
+@pytest.mark.django_db
+def test_distinct_printed_rows_with_same_product_are_not_auto_collapsed(employee):
+    submission = Submission.objects.create(kind=SubmissionKind.INVENTORY, submitted_by=employee)
+    first = invoice_line(
+        "SKU-A",
+        position=1,
+        cases=1,
+        loose_units=0,
+        received_units=12,
+        total_cents=6000,
+        upc="012345678905",
+    )
+    second = invoice_line(
+        "SKU-A",
+        position=2,
+        cases=1,
+        loose_units=0,
+        received_units=12,
+        total_cents=6000,
+        upc="012345678905",
+    )
+    extracted_document(
+        submission,
+        DocumentType.DELIVERY_INVOICE,
+        invoice_page([first]),
+        index=1,
+    )
+    extracted_document(
+        submission,
+        DocumentType.DELIVERY_INVOICE,
+        {
+            **invoice_page([second]),
+            "printed_total_cases": evidence("2"),
+            "printed_total_loose_units": evidence("0"),
+            "printed_total_physical_units": evidence("24"),
+        },
+        index=2,
+    )
+
+    materialize_submission(submission)
+
+    assert submission.delivery.lines.count() == 2
+
+
+@pytest.mark.django_db
+def test_zero_backorder_line_is_kept_as_evidence_but_excluded(employee):
+    submission = Submission.objects.create(kind=SubmissionKind.INVENTORY, submitted_by=employee)
+    backorder = invoice_line(
+        "SKU-BO",
+        position=1,
+        cases=0,
+        loose_units=0,
+        received_units=0,
+        total_cents=0,
+        description="Bacardi Rum 1.75L - 1 case backordered, reorder",
+        pack_text="6/1.75L",
+    )
+    extracted_document(
+        submission,
+        DocumentType.DELIVERY_INVOICE,
+        invoice_page([backorder]),
+    )
+
+    materialize_submission(submission)
+
+    line = submission.delivery.lines.get()
+    assert line.match_status == LineMatchStatus.EXCLUDED
+    assert line.included is False
+    assert "inventory was received" in line.review_note
 
 
 @pytest.mark.django_db

@@ -10,6 +10,8 @@ urlpatterns = [
     path("deliveries/<uuid:pk>/export/", views.export_delivery, name="export"),
     path("deliveries/<uuid:pk>/sync-catalog/", views.sync_catalog, name="sync-catalog"),
     path("deliveries/<uuid:pk>/refresh-counts/", views.refresh_counts, name="refresh-counts"),
+    path("deliveries/<uuid:pk>/prices/preview/", views.preview_prices, name="preview-prices"),
+    path("deliveries/<uuid:pk>/prices/push/", views.push_prices, name="push-prices"),
     path("deliveries/<uuid:pk>/push/", views.push_delivery, name="push"),
     path("deliveries/<uuid:pk>/lines/add/", views.line_create, name="line-create"),
     path(

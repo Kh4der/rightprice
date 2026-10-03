@@ -23,7 +23,14 @@ from .models import (
     LineMatchStatus,
     SquareCatalogVariation,
 )
-from .packs import MAX_UNITS_PER_CASE, PackError, is_non_stock_line, parse_pack
+from .packs import (
+    MAX_UNITS_PER_CASE,
+    PackError,
+    calculate_received_units,
+    is_non_stock_line,
+    is_unreceived_line,
+    parse_pack,
+)
 
 
 def normalize_upc(value: object) -> str:
@@ -63,9 +70,7 @@ def nearest_catalog_matches(line: DeliveryLine, *, limit: int = 5) -> list[Squar
     # Distributor invoices often put the bottle size only in a separate pack
     # column (for example ``12/750ML``).  Include that evidence when filtering
     # suggestions, but keep pack counts out of the name-similarity score.
-    source_sizes = _sizes_in_ml(
-        f"{description} {normalize_description(line.pack_text).casefold()}"
-    )
+    source_sizes = _sizes_in_ml(f"{description} {normalize_description(line.pack_text).casefold()}")
     ranked: list[tuple[float, str, str, str, SquareCatalogVariation]] = []
     for variation in _usable_catalog().order_by("variation_id"):
         label = normalize_description(
@@ -161,7 +166,19 @@ def line_readiness_issues(line: DeliveryLine) -> list[LineIssue]:
         issues.append(LineIssue(line_id, "variation_missing", "Square variation ID is required."))
     if line.units_per_case is None or line.units_per_case <= 0:
         issues.append(
-            LineIssue(line_id, "pack_missing", "Enter a verified number of units per case.")
+            LineIssue(
+                line_id,
+                "pack_missing",
+                "Enter the verified number of Square units per case.",
+            )
+        )
+    if line.cases is not None and line.loose_units is None:
+        issues.append(
+            LineIssue(
+                line_id,
+                "loose_units_missing",
+                "Enter the loose bottle/can count from the invoice, or 0 if none.",
+            )
         )
     if line.received_units is None:
         issues.append(LineIssue(line_id, "quantity_missing", "Received units are required."))
@@ -178,7 +195,7 @@ def line_readiness_issues(line: DeliveryLine) -> list[LineIssue]:
             LineIssue(
                 line_id,
                 "fractional_units",
-                "Sellable liquor inventory must be a whole number of units.",
+                "Square inventory must be a whole number of units.",
             )
         )
     if line.square_count_before is None or line.projected_count_after is None:
@@ -201,17 +218,24 @@ def line_readiness_issues(line: DeliveryLine) -> list[LineIssue]:
             )
         )
 
+    calculated_units = calculate_received_units(
+        cases=line.cases,
+        units_per_case=line.units_per_case,
+        loose_units=line.loose_units,
+    )
     if (
-        line.cases is not None
-        and line.units_per_case is not None
+        calculated_units is not None
         and line.received_units is not None
-        and line.cases * line.units_per_case != line.received_units
+        and calculated_units != line.received_units
     ):
         issues.append(
             LineIssue(
                 line_id,
                 "unit_math_mismatch",
-                "Received units must equal cases multiplied by units per case.",
+                (
+                    "Received units must equal cases multiplied by Square units per case, "
+                    "plus loose units."
+                ),
             )
         )
     return issues
@@ -387,12 +411,22 @@ def _normalize_one(line: DeliveryLine) -> list[LineIssue]:
     line.square_item_name = normalize_description(line.square_item_name)
     _clear_square_cost_snapshot(line)
 
-    if is_non_stock_line(line.description) or not line.included:
+    unreceived = is_unreceived_line(
+        line.description,
+        cases=line.cases,
+        loose_units=line.loose_units,
+        received_units=line.received_units,
+        line_total_cents=line.line_total_cents,
+    )
+    if is_non_stock_line(line.description) or unreceived or not line.included:
         line.included = False
         line.match_status = LineMatchStatus.EXCLUDED
         line.square_catalog_variation_id = ""
         line.square_item_name = ""
-        _set_auto_note(line, None)
+        _set_auto_note(
+            line,
+            "No inventory was received; zero or backordered line excluded." if unreceived else None,
+        )
         return []
 
     candidate, source, identifier_issues = _identifier_match(line)
@@ -445,6 +479,14 @@ def _normalize_one(line: DeliveryLine) -> list[LineIssue]:
             line.match_status = LineMatchStatus.SUGGESTED
 
     issues: list[LineIssue] = []
+    if line.cases is not None and line.loose_units is None:
+        issues.append(
+            LineIssue(
+                str(line.id),
+                "loose_units_missing",
+                "Enter the loose bottle/can count from the invoice, or 0 if none.",
+            )
+        )
     if line.units_per_case is None:
         try:
             line.units_per_case = parse_pack(line.pack_text).units_per_case
@@ -459,8 +501,12 @@ def _normalize_one(line: DeliveryLine) -> list[LineIssue]:
             )
         )
 
-    if line.cases is not None and line.units_per_case is not None:
-        calculated = line.cases * Decimal(line.units_per_case)
+    calculated = calculate_received_units(
+        cases=line.cases,
+        units_per_case=line.units_per_case,
+        loose_units=line.loose_units,
+    )
+    if calculated is not None:
         if line.received_units is None:
             line.received_units = calculated
         elif line.received_units != calculated:
@@ -468,7 +514,10 @@ def _normalize_one(line: DeliveryLine) -> list[LineIssue]:
                 LineIssue(
                     str(line.id),
                     "unit_math_mismatch",
-                    "Received units do not equal cases multiplied by units per case.",
+                    (
+                        "Received units do not equal cases multiplied by Square units per case, "
+                        "plus loose units."
+                    ),
                 )
             )
 
@@ -509,6 +558,7 @@ def normalize_delivery_lines(delivery: Delivery) -> MatchingResult:
         "upc",
         "description",
         "pack_text",
+        "loose_units",
         "units_per_case",
         "received_units",
         "square_catalog_variation_id",

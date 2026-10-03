@@ -5,13 +5,21 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 from django.utils import timezone
 
 from apps.accounts.models import Role, User
-from apps.audit.models import AuditEvent
-from apps.capture.models import Submission, SubmissionKind, SubmissionStatus
-from apps.inventory.services import DeliveryNotReady
+from apps.audit.models import AuditEvent, FieldCorrection
+from apps.capture.models import (
+    Document,
+    DocumentStatus,
+    DocumentType,
+    Submission,
+    SubmissionKind,
+    SubmissionStatus,
+)
+from apps.inventory.services import DeliveryNotReady, refresh_delivery_readiness
 
 from ..models import (
     Delivery,
@@ -101,6 +109,7 @@ def test_owner_correction_clears_stale_count_evidence(client, owner, delivery):
             f"{prefix}-upc": line.upc,
             f"{prefix}-pack_text": line.pack_text,
             f"{prefix}-cases": "3",
+            f"{prefix}-loose_units": "0",
             f"{prefix}-units_per_case": "12",
             f"{prefix}-received_units": "36",
             f"{prefix}-included": "on",
@@ -114,6 +123,154 @@ def test_owner_correction_clears_stale_count_evidence(client, owner, delivery):
     assert line.square_count_variation_id == ""
     assert line.square_count_before is None
     assert line.projected_count_after is None
+
+
+@pytest.mark.django_db
+def test_owner_header_correction_records_original_values(client, owner, delivery):
+    client.force_login(owner)
+
+    response = client.post(
+        reverse("inventory:header-update", args=[delivery.pk]),
+        {
+            "vendor_name_raw": "Corrected Distributor",
+            "invoice_number": "INV-200",
+            "invoice_date": "2026-10-02",
+            "invoice_total": "123.45",
+            "printed_total_cases": "2",
+            "printed_total_loose_units": "0",
+            "printed_total_physical_units": "24",
+        },
+    )
+
+    assert response.status_code == 302
+    event = AuditEvent.objects.get(action="inventory.header_corrected")
+    assert event.detail["changes"]["vendor_name_raw"] == {
+        "before": "Test Distributor",
+        "after": "Corrected Distributor",
+    }
+    assert event.detail["changes"]["invoice_number"] == {
+        "before": "INV-100",
+        "after": "INV-200",
+    }
+    assert event.detail["changes"]["printed_total_cases"] == {
+        "before": None,
+        "after": "2.000",
+    }
+    assert event.detail["changes"]["printed_total_loose_units"] == {
+        "before": None,
+        "after": "0.000",
+    }
+    assert event.detail["changes"]["printed_total_physical_units"] == {
+        "before": None,
+        "after": "24.000",
+    }
+
+
+@pytest.mark.django_db
+def test_owner_can_correct_misread_footer_total_and_clear_guard(client, owner, delivery):
+    line = delivery.lines.get()
+    line.loose_units = Decimal("0")
+    line.save(update_fields=["loose_units", "updated_at"])
+    delivery.printed_total_cases = Decimal("3")
+    delivery.printed_total_loose_units = Decimal("0")
+    delivery.printed_total_physical_units = Decimal("24")
+    delivery.save(
+        update_fields=[
+            "printed_total_cases",
+            "printed_total_loose_units",
+            "printed_total_physical_units",
+            "updated_at",
+        ]
+    )
+    Document.objects.create(
+        submission=delivery.submission,
+        file=SimpleUploadedFile("invoice-footer.jpg", b"invoice footer", "image/jpeg"),
+        original_name="invoice-footer.jpg",
+        media_type="image/jpeg",
+        size_bytes=14,
+        sha256="f" * 64,
+        requested_type=DocumentType.DELIVERY_INVOICE,
+        detected_type=DocumentType.DELIVERY_INVOICE,
+        status=DocumentStatus.EXTRACTED,
+    )
+    initial = refresh_delivery_readiness(delivery)
+    assert "invoice_total_cases_mismatch" in {issue.code for issue in initial.issues}
+
+    client.force_login(owner)
+    response = client.post(
+        reverse("inventory:header-update", args=[delivery.pk]),
+        {
+            "vendor_name_raw": delivery.vendor_name_raw,
+            "invoice_number": delivery.invoice_number,
+            "invoice_date": "2026-10-02",
+            "invoice_total": "",
+            "printed_total_cases": "2",
+            "printed_total_loose_units": "0",
+            "printed_total_physical_units": "24",
+        },
+    )
+
+    assert response.status_code == 302
+    delivery.refresh_from_db()
+    corrected = refresh_delivery_readiness(delivery)
+    assert not any(issue.code.startswith("invoice_total_") for issue in corrected.issues)
+    event = AuditEvent.objects.get(action="inventory.header_corrected")
+    assert event.detail["changes"]["printed_total_cases"] == {
+        "before": "3.000",
+        "after": "2.000",
+    }
+
+    detail = client.get(reverse("inventory:delivery-detail", args=[delivery.pk]))
+    assert b"Footer: total cases" in detail.content
+    assert b"Footer: loose bottles/cans" in detail.content
+    assert b"Footer: total physical bottles/cans" in detail.content
+
+
+@pytest.mark.django_db
+def test_owner_can_record_loose_units_separately_from_cases(client, owner, delivery):
+    line = delivery.lines.get()
+    Document.objects.create(
+        submission=delivery.submission,
+        file=SimpleUploadedFile("invoice.jpg", b"invoice image", "image/jpeg"),
+        original_name="invoice.jpg",
+        media_type="image/jpeg",
+        size_bytes=13,
+        sha256="a" * 64,
+        requested_type=DocumentType.DELIVERY_INVOICE,
+        detected_type=DocumentType.DELIVERY_INVOICE,
+        status=DocumentStatus.EXTRACTED,
+    )
+    client.force_login(owner)
+    prefix = f"line-{line.pk}"
+
+    response = client.post(
+        reverse("inventory:line-update", args=[delivery.pk, line.pk]),
+        {
+            f"{prefix}-description": line.description,
+            f"{prefix}-vendor_sku": line.vendor_sku,
+            f"{prefix}-upc": line.upc,
+            f"{prefix}-pack_text": line.pack_text,
+            f"{prefix}-cases": "1",
+            f"{prefix}-loose_units": "2",
+            f"{prefix}-units_per_case": "12",
+            f"{prefix}-received_units": "14",
+            f"{prefix}-included": "on",
+            f"{prefix}-review_note": "One case plus two loose units",
+        },
+    )
+
+    assert response.status_code == 302
+    line.refresh_from_db()
+    assert line.loose_units == Decimal("2")
+    assert line.received_units == Decimal("14")
+    event = AuditEvent.objects.get(action="inventory.line_corrected", target_id=str(line.pk))
+    assert event.detail["changes"]["loose_units"] == {"before": "0.000", "after": "2"}
+    correction = FieldCorrection.objects.get(
+        field_path="delivery.lines[1].loose_units",
+        corrected_by=owner,
+    )
+    assert correction.previous_value == "0.000"
+    assert correction.corrected_value == "2"
 
 
 @pytest.mark.django_db
@@ -150,6 +307,7 @@ def test_owner_can_add_a_line_the_photo_reader_missed(client, owner, delivery):
             "new-upc": "012345678929",
             "new-pack_text": "6/1L",
             "new-cases": "2",
+            "new-loose_units": "0",
             "new-units_per_case": "6",
             "new-received_units": "12",
             "new-unit_cost": "15.00",
@@ -199,9 +357,7 @@ def test_owner_can_choose_only_cached_stocked_square_variation(client, owner, de
 
 
 @pytest.mark.django_db
-def test_owner_can_explicitly_create_and_match_new_square_item(
-    client, owner, delivery, settings
-):
+def test_owner_can_explicitly_create_and_match_new_square_item(client, owner, delivery, settings):
     settings.SQUARE_CATALOG_WRITES_ENABLED = True
     line = delivery.lines.get()
     client.force_login(owner)
@@ -267,9 +423,7 @@ def test_owner_downloads_final_workbook_only_after_live_comparison(client, owner
     delivery.submission.status = SubmissionStatus.APPROVED
     delivery.submission.approved_by = owner
     delivery.submission.approved_at = timezone.now()
-    delivery.submission.save(
-        update_fields=["status", "approved_by", "approved_at", "updated_at"]
-    )
+    delivery.submission.save(update_fields=["status", "approved_by", "approved_at", "updated_at"])
     client.force_login(owner)
 
     response = client.get(reverse("inventory:export", args=[delivery.pk]))
@@ -337,9 +491,7 @@ def test_owner_can_refresh_live_counts_after_evidence_approval(client, owner, de
     delivery.submission.status = SubmissionStatus.APPROVED
     delivery.submission.approved_by = owner
     delivery.submission.approved_at = timezone.now()
-    delivery.submission.save(
-        update_fields=["status", "approved_by", "approved_at", "updated_at"]
-    )
+    delivery.submission.save(update_fields=["status", "approved_by", "approved_at", "updated_at"])
     client.force_login(owner)
 
     with patch("apps.inventory.views.refresh_square_counts") as refresh:

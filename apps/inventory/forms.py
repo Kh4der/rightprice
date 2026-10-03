@@ -6,8 +6,11 @@ from decimal import Decimal
 from typing import ClassVar
 
 from django import forms
+from django.forms import formset_factory
 
 from .models import Delivery, DeliveryLine
+from .packs import calculate_received_units, line_total_matches_rounded_unit_cost
+from .pricing import LIQUOR_PRICING_CATEGORIES
 
 
 class DeliveryHeaderForm(forms.ModelForm):
@@ -22,16 +25,40 @@ class DeliveryHeaderForm(forms.ModelForm):
 
     class Meta:
         model = Delivery
-        fields = ("vendor_name_raw", "invoice_number", "invoice_date")
+        fields = (
+            "vendor_name_raw",
+            "invoice_number",
+            "invoice_date",
+            "printed_total_cases",
+            "printed_total_loose_units",
+            "printed_total_physical_units",
+        )
         widgets: ClassVar[dict[str, forms.Widget]] = {
             "vendor_name_raw": forms.TextInput(attrs={"autocomplete": "organization"}),
             "invoice_number": forms.TextInput(attrs={"autocomplete": "off"}),
             "invoice_date": forms.DateInput(attrs={"type": "date"}),
+            "printed_total_cases": forms.NumberInput(
+                attrs={"step": "0.001", "min": "0", "inputmode": "decimal"}
+            ),
+            "printed_total_loose_units": forms.NumberInput(
+                attrs={"step": "0.001", "min": "0", "inputmode": "decimal"}
+            ),
+            "printed_total_physical_units": forms.NumberInput(
+                attrs={"step": "0.001", "min": "0", "inputmode": "decimal"}
+            ),
         }
         labels: ClassVar[dict[str, str]] = {
             "vendor_name_raw": "Distributor",
             "invoice_number": "Invoice number",
             "invoice_date": "Invoice date",
+            "printed_total_cases": "Footer: total cases",
+            "printed_total_loose_units": "Footer: loose bottles/cans",
+            "printed_total_physical_units": "Footer: total physical bottles/cans",
+        }
+        help_texts: ClassVar[dict[str, str]] = {
+            "printed_total_cases": "Use TOTAL CASES or the case side of TOTAL CS/BTLS.",
+            "printed_total_loose_units": "Use TOTAL BOT or the loose side of TOTAL CS/BTLS.",
+            "printed_total_physical_units": "Use TOTAL BOTTLES only; leave blank if not printed.",
         }
 
     def __init__(self, *args, **kwargs):
@@ -68,6 +95,7 @@ class DeliveryLineForm(forms.ModelForm):
             "upc",
             "pack_text",
             "cases",
+            "loose_units",
             "units_per_case",
             "received_units",
             "unit_cost",
@@ -81,6 +109,9 @@ class DeliveryLineForm(forms.ModelForm):
             "upc": forms.TextInput(attrs={"inputmode": "numeric", "autocomplete": "off"}),
             "pack_text": forms.TextInput(attrs={"autocomplete": "off"}),
             "cases": forms.NumberInput(attrs={"step": "0.001", "inputmode": "decimal"}),
+            "loose_units": forms.NumberInput(
+                attrs={"step": "1", "min": "0", "inputmode": "numeric"}
+            ),
             "units_per_case": forms.NumberInput(attrs={"min": "1", "inputmode": "numeric"}),
             "received_units": forms.NumberInput(
                 attrs={"step": "1", "min": "0", "inputmode": "numeric"}
@@ -90,8 +121,9 @@ class DeliveryLineForm(forms.ModelForm):
         labels: ClassVar[dict[str, str]] = {
             "pack_text": "Pack printed on invoice",
             "cases": "Cases received",
-            "units_per_case": "Sellable bottles per case",
-            "received_units": "Total sellable bottles",
+            "loose_units": "Loose bottles/cans (enter 0 if none)",
+            "units_per_case": "Square units per case",
+            "received_units": "Total units to add",
             "included": "Add this line to Square inventory",
             "review_note": "Review note",
         }
@@ -114,30 +146,53 @@ class DeliveryLineForm(forms.ModelForm):
             return cleaned
 
         cases = cleaned.get("cases")
+        loose_units = cleaned.get("loose_units")
         units_per_case = cleaned.get("units_per_case")
         received_units = cleaned.get("received_units")
         if cases is not None and cases < 0:
             self.add_error("cases", "Cases cannot be negative.")
+        if cases is not None and loose_units is None:
+            self.add_error(
+                "loose_units",
+                "Enter the loose bottle/can count shown on the invoice, or enter 0 if none.",
+            )
+        if loose_units is not None and loose_units < 0:
+            self.add_error("loose_units", "Loose units cannot be negative.")
+        if loose_units is not None and loose_units != loose_units.to_integral_value():
+            self.add_error("loose_units", "Loose units must be a whole number.")
         if received_units is not None and received_units <= 0:
-            self.add_error("received_units", "Enter at least one sellable bottle.")
+            self.add_error("received_units", "Enter at least one Square unit.")
         if received_units is not None and received_units != received_units.to_integral_value():
-            self.add_error("received_units", "Inventory must be a whole number of bottles.")
-        if cases is not None and units_per_case is not None and received_units is not None:
-            expected = cases * Decimal(units_per_case)
-            if expected != received_units:
-                self.add_error(
-                    "received_units",
-                    "This must equal cases received multiplied by bottles per case.",
-                )
+            self.add_error("received_units", "Inventory must be a whole number of Square units.")
+        expected = calculate_received_units(
+            cases=cases,
+            units_per_case=units_per_case,
+            loose_units=loose_units,
+        )
+        if expected is not None and received_units is not None and received_units != expected:
+            self.add_error(
+                "received_units",
+                ("This must equal cases multiplied by Square units per case, plus loose units."),
+            )
         unit_cost = cleaned.get("unit_cost")
         line_total = cleaned.get("line_total")
-        if unit_cost is not None and received_units is not None and line_total is not None:
-            expected_total = unit_cost * received_units
-            if expected_total != line_total:
-                self.add_error(
-                    "line_total",
-                    "This must equal invoice unit cost multiplied by received bottles.",
-                )
+        if (
+            unit_cost is not None
+            and received_units is not None
+            and line_total is not None
+            and not line_total_matches_rounded_unit_cost(
+                quantity=received_units,
+                unit_cost_cents=int(unit_cost * 100),
+                line_total_cents=int(line_total * 100),
+            )
+        ):
+            self.add_error(
+                "line_total",
+                (
+                    "This total does not match the received units and printed "
+                    "unit cost, allowing normal one-cent unit-price rounding."
+                ),
+            )
         return cleaned
 
     def save(self, commit: bool = True):
@@ -239,4 +294,116 @@ class NewSquareItemForm(forms.Form):
 class SquarePushConfirmationForm(forms.Form):
     confirm = forms.BooleanField(
         label="I reviewed the item matches, case sizes, and projected Square counts.",
+    )
+
+
+class DeliveryPricingRulesForm(forms.Form):
+    """One all-products markup plus optional liquor-category overrides."""
+
+    default_markup_percent = forms.DecimalField(
+        label="All products on this invoice",
+        required=False,
+        min_value=0,
+        max_value=1000,
+        max_digits=7,
+        decimal_places=3,
+        widget=forms.NumberInput(
+            attrs={
+                "step": "0.1",
+                "min": "0",
+                "max": "1000",
+                "inputmode": "decimal",
+                "placeholder": "Example: 25",
+            }
+        ),
+        help_text="Leave blank if you only want to change selected categories or products.",
+    )
+
+    def __init__(self, *args, category_rules=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        rules = category_rules if isinstance(category_rules, dict) else {}
+        for index, category in enumerate(LIQUOR_PRICING_CATEGORIES):
+            field_name = self.category_field_name(index)
+            self.fields[field_name] = forms.DecimalField(
+                label=category,
+                required=False,
+                min_value=0,
+                max_value=1000,
+                max_digits=7,
+                decimal_places=3,
+                widget=forms.NumberInput(
+                    attrs={
+                        "step": "0.1",
+                        "min": "0",
+                        "max": "1000",
+                        "inputmode": "decimal",
+                        "placeholder": "Use all-products %",
+                    }
+                ),
+            )
+            if category in rules:
+                self.initial[field_name] = rules[category]
+
+    @staticmethod
+    def category_field_name(index: int) -> str:
+        return f"category_{index}"
+
+    def category_rate_fields(self):
+        return [
+            (category, self[self.category_field_name(index)])
+            for index, category in enumerate(LIQUOR_PRICING_CATEGORIES)
+        ]
+
+    def cleaned_category_rules(self) -> dict[str, str]:
+        """Return JSON-safe explicit overrides, preserving an entered zero."""
+
+        return {
+            category: str(value)
+            for index, category in enumerate(LIQUOR_PRICING_CATEGORIES)
+            if (value := self.cleaned_data.get(self.category_field_name(index))) is not None
+        }
+
+
+class PricingProductRuleForm(forms.Form):
+    """Owner category correction and optional one-product percentage."""
+
+    variation_id = forms.CharField(widget=forms.HiddenInput)
+    category = forms.ChoiceField(
+        label="Price category",
+        required=False,
+        choices=(
+            ("", "Use the Square category"),
+            *((category, category) for category in LIQUOR_PRICING_CATEGORIES),
+        ),
+    )
+    markup_percent = forms.DecimalField(
+        label="Only this product (%)",
+        required=False,
+        min_value=0,
+        max_value=1000,
+        max_digits=7,
+        decimal_places=3,
+        widget=forms.NumberInput(
+            attrs={
+                "step": "0.1",
+                "min": "0",
+                "max": "1000",
+                "inputmode": "decimal",
+                "placeholder": "Optional",
+            }
+        ),
+    )
+
+
+PricingProductRuleFormSet = formset_factory(
+    PricingProductRuleForm,
+    extra=0,
+    can_delete=False,
+)
+
+
+class SquarePriceConfirmationForm(forms.Form):
+    preview_hash = forms.CharField(widget=forms.HiddenInput)
+    confirm = forms.BooleanField(
+        label="I checked the products, current Square prices, and new prices shown above.",
     )

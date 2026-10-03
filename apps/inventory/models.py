@@ -46,6 +46,16 @@ class CatalogCreationStatus(models.TextChoices):
     FAILED = "FAILED", "Request failed; safe retry required"
 
 
+class PricingPlanStatus(models.TextChoices):
+    """Lifecycle of an owner-reviewed delivery price update."""
+
+    DRAFT = "DRAFT", "Draft"
+    PREVIEWED = "PREVIEWED", "Ready to update"
+    PUSHING = "PUSHING", "Updating Square"
+    PUSHED = "PUSHED", "Updated in Square"
+    FAILED = "FAILED", "Update failed"
+
+
 class Vendor(models.Model):
     name = models.CharField(max_length=160, unique=True)
     square_vendor_id = models.CharField(max_length=64, blank=True)
@@ -115,6 +125,15 @@ class SquareCatalogVariation(models.Model):
     default_unit_cost_currency = models.CharField(max_length=3, blank=True)
     default_unit_cost_vendor_id = models.CharField(max_length=64, blank=True)
     vendor_costs = models.JSONField(default=list, blank=True)
+    current_price_cents = models.BigIntegerField(null=True, blank=True)
+    current_price_currency = models.CharField(max_length=3, blank=True)
+    pricing_type = models.CharField(max_length=32, blank=True)
+    catalog_version = models.BigIntegerField(null=True, blank=True)
+    reporting_category_id = models.CharField(max_length=64, blank=True, db_index=True)
+    reporting_category_name = models.CharField(max_length=300, blank=True)
+    category_path = models.JSONField(default=list, blank=True)
+    price_from_location_override = models.BooleanField(default=False)
+    catalog_object_snapshot = models.JSONField(default=dict, blank=True)
     synced_at = models.DateTimeField(default=timezone.now, db_index=True)
 
     class Meta:
@@ -195,6 +214,18 @@ class Delivery(models.Model):
     invoice_number = models.CharField(max_length=100, blank=True)
     invoice_date = models.DateField(null=True, blank=True)
     invoice_total_cents = models.BigIntegerField(null=True, blank=True)
+    # Independent footer quantities from distributor invoices. Their complete
+    # evidence remains on Document.extracted_data; these values make it possible
+    # to guard the owner-reviewed, de-duplicated line set before any Square write.
+    printed_total_cases = models.DecimalField(
+        max_digits=14, decimal_places=3, null=True, blank=True
+    )
+    printed_total_loose_units = models.DecimalField(
+        max_digits=14, decimal_places=3, null=True, blank=True
+    )
+    printed_total_physical_units = models.DecimalField(
+        max_digits=14, decimal_places=3, null=True, blank=True
+    )
     status = models.CharField(
         max_length=24,
         choices=DeliveryStatus.choices,
@@ -238,6 +269,16 @@ class DeliveryLine(models.Model):
     description = models.CharField(max_length=300)
     pack_text = models.CharField(max_length=80, blank=True)
     cases = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    # Distributor invoices commonly split quantity into full cases and loose
+    # bottles (for example ``CS/BT 1/2``).  Keep the loose quantity separate so
+    # a partial case is never disguised as a fractional case count.
+    loose_units = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        default=Decimal("0"),
+    )
     units_per_case = models.PositiveIntegerField(null=True, blank=True)
     received_units = models.DecimalField(max_digits=14, decimal_places=3, null=True, blank=True)
     unit_cost_cents = models.BigIntegerField(null=True, blank=True)
@@ -339,6 +380,75 @@ class DeliveryLine(models.Model):
         return f"{prefix}{change}%"
 
 
+class DeliveryPricingPlan(models.Model):
+    """Owner pricing rules and the immutable Square update prepared from them.
+
+    Editable rules are deliberately separate from ``frozen_payload``.  Once a
+    preview is approved, the Square writer can retry the exact same payload and
+    idempotency key without silently applying later form edits.
+    """
+
+    delivery = models.OneToOneField(
+        Delivery,
+        on_delete=models.CASCADE,
+        related_name="pricing_plan",
+    )
+    default_markup_percent = models.DecimalField(
+        max_digits=9,
+        decimal_places=3,
+        null=True,
+        blank=True,
+    )
+    category_rules = models.JSONField(default=dict, blank=True)
+    product_overrides = models.JSONField(default=dict, blank=True)
+    category_assignments = models.JSONField(default=dict, blank=True)
+    preview_lines = models.JSONField(default=list, blank=True)
+    issues = models.JSONField(default=list, blank=True)
+    status = models.CharField(
+        max_length=16,
+        choices=PricingPlanStatus.choices,
+        default=PricingPlanStatus.DRAFT,
+        db_index=True,
+    )
+    revision = models.PositiveIntegerField(default=1)
+    frozen_payload = models.JSONField(default=dict, blank=True)
+    frozen_payload_hash = models.CharField(max_length=64, blank=True)
+    idempotency_key = models.CharField(max_length=64, blank=True)
+    square_result = models.JSONField(default=dict, blank=True)
+    square_error = models.TextField(blank=True)
+    prepared_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="prepared_delivery_pricing_plans",
+    )
+    prepared_at = models.DateTimeField(null=True, blank=True)
+    pushed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="pushed_delivery_pricing_plans",
+    )
+    pushed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["idempotency_key"],
+                condition=~models.Q(idempotency_key=""),
+                name="unique_pricing_plan_idempotency_key",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"Pricing for {self.delivery}"
+
+
 def inventory_sandbox_workbook_path(instance: InventorySandboxJob, _filename: str) -> str:
     """Return the only protected-storage path accepted for a sandbox workbook."""
 
@@ -370,7 +480,7 @@ class InventorySandboxJob(models.Model):
         default=InventorySandboxJobStatus.PENDING,
         db_index=True,
     )
-    workflow_version = models.CharField(max_length=40, default="inventory_invoice_v1")
+    workflow_version = models.CharField(max_length=40, default="inventory_invoice_v3")
     session_id = models.CharField(max_length=100, null=True, blank=True, unique=True)
     input_manifest = models.JSONField(default=dict, blank=True)
     extracted_result = models.JSONField(default=dict, blank=True)

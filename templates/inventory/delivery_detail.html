@@ -29,9 +29,10 @@
 
 {% if can_edit %}
 <details class="section-block invoice-header-review" {% if not delivery.invoice_number or not delivery.invoice_date or not delivery.vendor_name_raw %}open{% endif %}>
-  <summary><span><span class="eyebrow">Invoice identity</span><strong>Confirm distributor, number, date, and total</strong></span><span class="text-link">Edit details</span></summary>
+  <summary><span><span class="eyebrow">Invoice identity and footer</span><strong>Confirm the top and bottom of the invoice</strong></span><span class="text-link">Edit details</span></summary>
   <form method="post" action="{% url 'inventory:header-update' delivery.pk %}" class="line-edit-form header-edit-form">
-    {% csrf_token %}{% for field in header_form %}<div class="field {% if field.errors %}field-error{% endif %}"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% for error in field.errors %}<p class="field-message">{{ error }}</p>{% endfor %}</div>{% endfor %}<div class="button-row"><button class="button secondary" type="submit">Save invoice details</button></div>
+    <p class="help-text">The footer numbers prove every photographed row was included. Copy only totals printed on the invoice; leave a total blank when that label is not printed.</p>
+    {% csrf_token %}{% for field in header_form %}<div class="field {% if field.errors %}field-error{% endif %}"><label for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}{% if field.help_text %}<p class="help-text">{{ field.help_text }}</p>{% endif %}{% for error in field.errors %}<p class="field-message">{{ error }}</p>{% endfor %}</div>{% endfor %}<div class="button-row"><button class="button secondary" type="submit">Save invoice details</button></div>
   </form>
 </details>
 {% endif %}
@@ -91,14 +92,14 @@
           {% if line.square_item_name %}<span class="square-match">Square: {{ line.square_item_name }}</span>{% endif %}
           {% if line.review_note %}<small class="review-note">{{ line.review_note }}</small>{% endif %}
         </div>
-        <div class="line-quantity"><span>Delivery adds</span><strong>{% if line.received_units is not None %}+{{ line.received_units }}{% else %}—{% endif %}</strong><small>{{ line.cases|default:"—" }} case{{ line.cases|pluralize }} × {{ line.units_per_case|default:"?" }}</small></div>
+        <div class="line-quantity"><span>Delivery adds</span><strong>{% if line.received_units is not None %}+{{ line.received_units }}{% else %}—{% endif %}</strong><small>{{ line.cases|default:"—" }} case{{ line.cases|pluralize }} × {{ line.units_per_case|default:"?" }}{% if line.loose_units is not None %} + {{ line.loose_units }} loose{% else %} + ? loose{% endif %}</small></div>
         <div class="line-match"><span class="status {{ line.match_status|status_class }}">{{ line.get_match_status_display }}</span>{% if request.user.is_owner and can_edit and line.included %}<a class="text-link" href="{% url 'inventory:match-line' delivery.pk line.pk %}">{% if line.square_catalog_variation_id %}Change match{% else %}Find Square item{% endif %}</a>{% endif %}</div>
       </div>
 
       <div class="cost-comparison" aria-label="Unit cost comparison for {{ line.description }}">
         <div><span>Invoice unit cost</span><strong>{{ line.unit_cost_cents|money }}</strong></div>
         <div><span>Square baseline</span><strong>{% if line.square_unit_cost_cents is not None %}{{ line.square_unit_cost_cents|money }}{% else %}No baseline{% endif %}</strong>{% if line.square_unit_cost_source %}<small>{{ line.square_unit_cost_source }}</small>{% endif %}</div>
-        <div><span>Cost change</span><strong class="{% if line.unit_cost_change_percent > 0 %}cost-up{% elif line.unit_cost_change_percent < 0 %}cost-down{% endif %}">{{ line.unit_cost_change_display }}</strong>{% if line.unit_cost_change_cents is not None %}<small>{{ line.unit_cost_change_cents|money }} per bottle</small>{% endif %}</div>
+        <div><span>Cost change</span><strong class="{% if line.unit_cost_change_percent > 0 %}cost-up{% elif line.unit_cost_change_percent < 0 %}cost-down{% endif %}">{{ line.unit_cost_change_display }}</strong>{% if line.unit_cost_change_cents is not None %}<small>{{ line.unit_cost_change_cents|money }} per Square unit</small>{% endif %}</div>
         <div><span>Invoice line total</span><strong>{{ line.line_total_cents|money }}</strong></div>
       </div>
 
@@ -139,6 +140,137 @@
   </details>
   {% endif %}
 </section>
+
+{% if request.user.is_owner %}
+<section class="section-block pricing-panel" aria-labelledby="pricing-title">
+  <div class="section-heading pricing-heading">
+    <div>
+      <p class="eyebrow">Optional owner price update</p>
+      <h2 id="pricing-title">Set Square selling prices</h2>
+      <p>Choose a percentage for every product, a liquor category, or one product. The new selling price is the invoice unit cost plus that percentage.</p>
+    </div>
+    {% if pricing_plan %}<span class="status {{ pricing_plan.status|status_class }}">{{ pricing_plan.get_status_display }}</span>{% endif %}
+  </div>
+
+  <div class="pricing-explainer" role="note">
+    <strong>Simple example</strong>
+    <span>$10.00 invoice cost + 25% = $12.50 selling price</span>
+    <small>This tool never lowers an existing Square price. Inventory quantities and selling prices are updated with separate buttons.</small>
+  </div>
+
+  {% if pricing_can_edit %}
+    {% if pricing_product_rows %}
+    <form method="post" action="{% url 'inventory:preview-prices' delivery.pk %}" class="pricing-form">
+      {% csrf_token %}
+      {{ pricing_product_formset.management_form }}
+      <div class="pricing-default field {% if pricing_rules_form.default_markup_percent.errors %}field-error{% endif %}">
+        <label for="{{ pricing_rules_form.default_markup_percent.id_for_label }}">{{ pricing_rules_form.default_markup_percent.label }} (%)</label>
+        {{ pricing_rules_form.default_markup_percent }}
+        <p class="help-text">{{ pricing_rules_form.default_markup_percent.help_text }}</p>
+        {% for error in pricing_rules_form.default_markup_percent.errors %}<p class="field-message">{{ error }}</p>{% endfor %}
+      </div>
+
+      <details class="pricing-rules" {% if pricing_plan.category_rules %}open{% endif %}>
+        <summary><span><strong>Use different percentages by category</strong><small>Example: Vodka 30%, Wine 25%, Gin 28%</small></span><span class="text-link">Category choices</span></summary>
+        <div class="category-rate-grid">
+          {% for category, field in pricing_category_fields %}
+          <div class="field {% if field.errors %}field-error{% endif %}">
+            <label for="{{ field.id_for_label }}">{{ category }} (%)</label>
+            {{ field }}
+            {% for error in field.errors %}<p class="field-message">{{ error }}</p>{% endfor %}
+          </div>
+          {% endfor %}
+        </div>
+      </details>
+
+      <details class="pricing-rules" {% if pricing_plan.product_overrides or pricing_plan.category_assignments %}open{% endif %}>
+        <summary><span><strong>Change one product or fix its category</strong><small>A product percentage wins over its category and the all-products percentage.</small></span><span class="text-link">Product choices</span></summary>
+        <div class="data-table-wrap">
+          <table class="data-table pricing-products-table">
+            <thead><tr><th>Product</th><th>Square price</th><th>Price category</th><th>Only this product</th></tr></thead>
+            <tbody>
+              {% for product, form in pricing_product_rows %}
+              <tr>
+                <td><strong>{{ product.item_name }}</strong><small>{% if product.square_category %}Square category: {{ product.square_category }}{% else %}Choose a category if using category percentages{% endif %}</small>{{ form.variation_id }}</td>
+                <td>{% if product.current_price_cents is not None %}{{ product.current_price_cents|money }}{% else %}Pull Square items{% endif %}</td>
+                <td>{{ form.category }}{% for error in form.category.errors %}<p class="field-message">{{ error }}</p>{% endfor %}</td>
+                <td>{{ form.markup_percent }}<span class="input-suffix">%</span>{% for error in form.markup_percent.errors %}<p class="field-message">{{ error }}</p>{% endfor %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </details>
+
+      <div class="button-row pricing-preview-action">
+        <button class="button primary" type="submit">Preview new prices</button>
+        <small>Nothing is sent to Square during preview.</small>
+      </div>
+    </form>
+    {% else %}
+      <div class="notice neutral"><strong>Match products first</strong><p>Pull Square items and match the included invoice lines. Then the percentage choices will appear here.</p></div>
+    {% endif %}
+  {% endif %}
+
+  {% if pricing_plan and pricing_plan.issues %}
+  <div class="pricing-issues notice {% if pricing_plan.status == 'DRAFT' %}warning{% else %}neutral{% endif %}" role="status">
+    <strong>Items not included in this price update</strong>
+    <ul class="issue-list">{% for issue in pricing_plan.issues %}<li>{{ issue.message }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  {% if pricing_plan and pricing_plan.preview_lines %}
+  <div class="pricing-preview" aria-labelledby="pricing-preview-title">
+    <div class="section-heading">
+      <div><p class="eyebrow">Check before updating Square</p><h3 id="pricing-preview-title">Old and new selling prices</h3></div>
+      <strong>{{ pricing_preview_change_count }} price{{ pricing_preview_change_count|pluralize }} will change</strong>
+    </div>
+    <div class="data-table-wrap">
+      <table class="data-table pricing-preview-table">
+        <thead><tr><th>Product</th><th>Category</th><th>Invoice cost</th><th>Rule used</th><th>Square now</th><th>New price</th><th>Result</th></tr></thead>
+        <tbody>
+          {% for row in pricing_plan.preview_lines %}
+          <tr>
+            <td><strong>{{ row.item_name }}</strong><small>{{ row.variation_name }}</small></td>
+            <td>{{ row.category|default:"Not assigned" }}</td>
+            <td>{{ row.invoice_unit_cost_cents|money }}</td>
+            <td>{{ row.markup_percent }}%<small>{% if row.rule_source == 'PRODUCT' %}Product choice{% elif row.rule_source == 'CATEGORY' %}Category choice{% else %}All products{% endif %}</small></td>
+            <td>{{ row.current_price_cents|money }}</td>
+            <td><strong>{{ row.target_price_cents|money }}</strong></td>
+            <td>{% if row.price_changed %}<span class="status approved">Will increase</span>{% elif row.kept_existing_price %}<span class="status neutral">Kept higher price</span>{% else %}<span class="status neutral">No change</span>{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if pricing_plan.status == 'PUSHED' %}
+    <div class="notice success" role="status"><strong>Square selling prices updated</strong><p>{{ pricing_plan.square_result.updated_count }} price{{ pricing_plan.square_result.updated_count|pluralize }} updated{% if pricing_plan.pushed_at %} on {{ pricing_plan.pushed_at|date:"M j, Y \a\t g:i A" }}{% endif %}. This protected request cannot be applied twice.</p></div>
+  {% elif pricing_plan.frozen_payload.updates %}
+    <div class="pricing-confirm-panel">
+      <h3>Ready to update {{ pricing_preview_change_count }} Square price{{ pricing_preview_change_count|pluralize }}</h3>
+      {% if pricing_preview_is_stale %}
+        <div class="notice warning"><strong>Preview again</strong><p>An invoice line or Square match changed after this preview. Create a fresh price preview before updating Square.</p></div>
+      {% elif pricing_plan.status == 'PUSHING' and not pricing_push_is_stale %}
+        <div class="notice neutral"><strong>Square price update is running</strong><p>Keep this page open or return shortly. The protected request cannot be sent again while it is active.</p></div>
+      {% elif delivery.submission.status != 'APPROVED' %}
+        <div class="notice neutral"><strong>Approve the invoice first</strong><p>Preview is saved. Approve the invoice evidence, then return here to update the prices.</p></div>
+      {% elif not price_writes_enabled %}
+        <div class="notice warning"><strong>Square price updates are locked</strong><p>The preview is safe, but the separate selling-price connection is disabled by configuration.</p></div>
+      {% else %}
+        <form method="post" action="{% url 'inventory:push-prices' delivery.pk %}" class="stack-form">
+          {% csrf_token %}
+          {{ pricing_confirmation_form.preview_hash }}
+          <label class="confirm-check">{{ pricing_confirmation_form.confirm }}<span>{{ pricing_confirmation_form.confirm.label }}</span></label>
+          <button class="button primary full" type="submit">{% if pricing_plan.status == 'FAILED' or pricing_plan.status == 'PUSHING' %}Retry the protected price update{% else %}Update Square selling prices{% endif %}</button>
+        </form>
+      {% endif %}
+    </div>
+  {% endif %}
+</section>
+{% endif %}
 
 {% if request.user.is_owner and show_post_panel and not delivery.pushed_at %}
 <div class="inventory-tools">

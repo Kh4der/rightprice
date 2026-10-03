@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 import hmac
+import re
 import uuid
 from dataclasses import asdict, dataclass, replace
 from decimal import Decimal, InvalidOperation
+from difflib import SequenceMatcher
 from typing import Any
 
 from django.conf import settings
@@ -14,7 +16,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.audit.models import AuditEvent
-from apps.capture.models import SubmissionStatus
+from apps.capture.models import DocumentStatus, DocumentType, SubmissionStatus
 from apps.squareapi.client import get_client
 
 from .boundaries import is_demo_inventory_request
@@ -28,7 +30,7 @@ from .matching import (
     normalize_vendor_sku,
 )
 from .models import Delivery, DeliveryLine, DeliveryStatus
-from .packs import MAX_UNITS_PER_CASE
+from .packs import MAX_UNITS_PER_CASE, AmbiguousPack, PackError, parse_pack
 from .square_gateway import (
     DeliveryNotReady,
     InventoryWritesDisabled,
@@ -143,6 +145,7 @@ EDITABLE_FIELDS = (
     "description",
     "pack_text",
     "cases",
+    "loose_units",
     "units_per_case",
     "received_units",
     "square_catalog_variation_id",
@@ -761,6 +764,7 @@ def _validate_workbook_identity(delivery: Delivery, workbook: DeliveryWorkbook) 
         delivery_id=delivery.id,
         revision=delivery.spreadsheet_revision,
         line_ids=line_ids,
+        schema_version=workbook.schema_version,
     )
     if not hmac.compare_digest(workbook.signature, expected_signature):
         raise WorkbookValidationError(
@@ -807,6 +811,13 @@ def _parse_rows(
             ),
             "pack_text": _text(values["Pack"], "Pack", row=row, maximum=80),
             "cases": _decimal(values["Cases"], "Cases", row=row, max_digits=12, decimal_places=3),
+            "loose_units": _decimal(
+                values.get("Loose units"),
+                "Loose units",
+                row=row,
+                max_digits=14,
+                decimal_places=3,
+            ),
             "units_per_case": _integer(
                 values["Units per case"],
                 "Units per case",
@@ -1133,6 +1144,9 @@ def _refresh_status_from_current_lines(delivery: Delivery) -> ReadinessResult:
                 )
             )
     issues.extend(_duplicate_delivery_issues(delivery))
+    issues.extend(_mixed_invoice_photo_issues(delivery))
+    issues.extend(_possible_duplicate_line_issues(included))
+    issues.extend(_printed_quantity_total_issues(delivery, included))
     issues.extend(_projection_issues(included))
     if not included:
         issues.append(
@@ -1169,17 +1183,31 @@ def _duplicate_delivery_issues(delivery: Delivery) -> list[LineIssue]:
     )
     issues: list[LineIssue] = []
 
-    invoice_number = delivery.invoice_number.strip().casefold()
+    invoice_number = _normalized_invoice_identity_value(
+        "invoice number", delivery.invoice_number.strip()
+    )
     vendor_names = _delivery_vendor_names(delivery)
     if invoice_number and delivery.invoice_date is not None and vendor_names:
         possible_invoice_duplicates = candidates.filter(invoice_date=delivery.invoice_date)
         for other in possible_invoice_duplicates:
-            if other.invoice_number.strip().casefold() != invoice_number:
+            if (
+                _normalized_invoice_identity_value("invoice number", other.invoice_number.strip())
+                != invoice_number
+            ):
                 continue
             same_vendor_id = bool(
                 delivery.vendor_id and other.vendor_id and delivery.vendor_id == other.vendor_id
             )
-            if not same_vendor_id and not (vendor_names & _delivery_vendor_names(other)):
+            other_vendor_names = _delivery_vendor_names(other)
+            same_vendor_name = any(
+                _vendor_names_compatible(
+                    _normalized_invoice_identity_value("vendor", left),
+                    _normalized_invoice_identity_value("vendor", right),
+                )
+                for left in vendor_names
+                for right in other_vendor_names
+            )
+            if not same_vendor_id and not same_vendor_name:
                 continue
             issues.append(
                 LineIssue(
@@ -1219,12 +1247,309 @@ def _duplicate_delivery_issues(delivery: Delivery) -> list[LineIssue]:
     return issues
 
 
+def _mixed_invoice_photo_issues(delivery: Delivery) -> list[LineIssue]:
+    """Block a submission whose usable photos identify different invoices."""
+
+    documents = delivery.submission.documents.filter(
+        detected_type=DocumentType.DELIVERY_INVOICE,
+        status__in=[
+            DocumentStatus.EXTRACTED,
+            DocumentStatus.REVIEWED,
+            DocumentStatus.NEEDS_REVIEW,
+        ],
+    )
+    values: dict[str, list[str]] = {
+        "invoice number": [],
+        "vendor": [],
+        "invoice date": [],
+    }
+    paths = {
+        "invoice number": "invoice_number",
+        "vendor": "vendor_name",
+        "invoice date": "invoice_date",
+    }
+    for document in documents.only("extracted_data"):
+        payload = document.extracted_data
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(result, dict):
+            continue
+        for label, field in paths.items():
+            evidence = result.get(field)
+            value = evidence.get("value") if isinstance(evidence, dict) else evidence
+            if value is None:
+                continue
+            normalized = " ".join(str(value).split()).strip().casefold().replace("\u2019", "'")
+            if normalized:
+                values[label].append(normalized)
+
+    conflicts = []
+    for label, observed in values.items():
+        normalized_values = {
+            _normalized_invoice_identity_value(label, value) for value in observed if value
+        }
+        normalized_values.discard("")
+        if label == "vendor":
+            vendor_values = list(normalized_values)
+            if any(
+                not _vendor_names_compatible(left, right)
+                for index, left in enumerate(vendor_values)
+                for right in vendor_values[index + 1 :]
+            ):
+                conflicts.append(label)
+        elif len(normalized_values) > 1:
+            conflicts.append(label)
+    if not conflicts:
+        return []
+    return [
+        LineIssue(
+            str(delivery.id),
+            "mixed_invoice_photos",
+            (
+                "Uploaded invoice photos disagree on "
+                + ", ".join(conflicts)
+                + ". Separate the invoices or correct the evidence before posting stock."
+            ),
+        )
+    ]
+
+
+def _normalized_invoice_identity_value(label: str, value: str) -> str:
+    if label == "invoice number":
+        return "".join(character for character in value.casefold() if character.isalnum())
+    if label == "invoice date":
+        for date_format in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y", "%m-%d-%y"):
+            try:
+                return dt.datetime.strptime(value, date_format).date().isoformat()
+            except ValueError:
+                continue
+        return re.sub(r"\s+", "", value.casefold())
+    if label == "vendor":
+        tokens = re.findall(r"[a-z0-9]+", value.casefold().replace("\u2019", "'"))
+        aliases = {"bros": "brothers", "glazer": "glazers"}
+        ignored = {
+            "co",
+            "company",
+            "corp",
+            "corporation",
+            "fl",
+            "florida",
+            "inc",
+            "llc",
+            "of",
+            "s",
+            "the",
+        }
+        return " ".join(aliases.get(token, token) for token in tokens if token not in ignored)
+    return " ".join(value.casefold().split())
+
+
+def _vendor_names_compatible(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    if not left or not right:
+        return True
+    return SequenceMatcher(None, left, right).ratio() >= 0.86
+
+
+def _possible_duplicate_line_issues(lines: list[DeliveryLine]) -> list[LineIssue]:
+    """Flag strong-identity repeats without deleting source evidence."""
+
+    groups: dict[tuple[object, ...], list[tuple[DeliveryLine, tuple[object, ...]]]] = {}
+    for line in lines:
+        if line.upc:
+            identity = ("upc", normalize_upc(line.upc))
+        elif line.vendor_sku:
+            identity = ("vendor_sku", normalize_vendor_sku(line.vendor_sku).casefold())
+        else:
+            continue
+        detail = (
+            normalize_description(line.pack_text).casefold(),
+            line.cases,
+            line.loose_units,
+            line.received_units,
+            line.unit_cost_cents,
+            line.line_total_cents,
+        )
+        groups.setdefault(identity, []).append((line, detail))
+
+    issues: list[LineIssue] = []
+    for grouped_lines in groups.values():
+        if len(grouped_lines) < 2:
+            continue
+        duplicate_lines = [line for line, _detail in grouped_lines]
+        exact = len({detail for _line, detail in grouped_lines}) == 1
+        positions = ", ".join(str(line.position) for line in duplicate_lines)
+        reason = (
+            "have the same product identifier, quantities, pack, and cost"
+            if exact
+            else "share a product identifier but have different extracted details"
+        )
+        issues.append(
+            LineIssue(
+                str(duplicate_lines[0].id),
+                "possible_duplicate_line",
+                (
+                    f"Lines {positions} {reason}. Confirm whether they are separate received "
+                    "rows or an overlapping-photo duplicate, then combine or exclude a line "
+                    "before posting stock."
+                ),
+            )
+        )
+    return issues
+
+
 def _delivery_vendor_names(delivery: Delivery) -> set[str]:
     names = {delivery.vendor_name_raw.strip().casefold()}
     if delivery.vendor_id and delivery.vendor:
         names.add(delivery.vendor.name.strip().casefold())
     names.discard("")
     return names
+
+
+def _printed_quantity_total_issues(
+    delivery: Delivery,
+    lines: list[DeliveryLine],
+) -> list[LineIssue]:
+    """Compare independent invoice-footer quantities with reviewed stock rows.
+
+    Not every distributor prints quantity totals, so a financial invoice total
+    is also accepted as proof that the final page was reviewed. Photographed
+    deliveries need at least one of those independent final totals. Once a
+    quantity total is visibly printed, incomplete or disagreeing line evidence
+    must be resolved before Square receives an adjustment.
+    """
+
+    issues: list[LineIssue] = []
+    has_final_total_evidence = any(
+        value is not None
+        for value in (
+            delivery.invoice_total_cents,
+            delivery.printed_total_cases,
+            delivery.printed_total_loose_units,
+            delivery.printed_total_physical_units,
+        )
+    )
+    if delivery.submission.documents.exists() and not has_final_total_evidence:
+        issues.append(
+            LineIssue(
+                str(delivery.id),
+                "invoice_footer_evidence_missing",
+                (
+                    "No final invoice total or footer quantity total was captured. Upload the "
+                    "bottom/footer photo, or enter the printed invoice total, before posting "
+                    "stock so missing receipt rows cannot be mistaken for a complete delivery."
+                ),
+            )
+        )
+
+    specifications = (
+        (
+            delivery.printed_total_cases,
+            "cases",
+            "invoice_total_cases",
+            "cases",
+        ),
+        (
+            delivery.printed_total_loose_units,
+            "loose_units",
+            "invoice_total_loose_units",
+            "loose bottles/cans",
+        ),
+    )
+    for printed, field, code, label in specifications:
+        if printed is None:
+            continue
+        actual = _required_decimal_sum(lines, field)
+        issues.extend(
+            _printed_total_comparison_issues(
+                delivery=delivery,
+                printed=printed,
+                actual=actual,
+                code=code,
+                label=label,
+            )
+        )
+
+    if delivery.printed_total_physical_units is not None:
+        physical_values = [_physical_units_received(line) for line in lines]
+        actual_physical = (
+            None
+            if any(value is None for value in physical_values)
+            else sum((value for value in physical_values if value is not None), Decimal(0))
+        )
+        issues.extend(
+            _printed_total_comparison_issues(
+                delivery=delivery,
+                printed=delivery.printed_total_physical_units,
+                actual=actual_physical,
+                code="invoice_total_physical_units",
+                label="physical bottles/cans",
+            )
+        )
+    return issues
+
+
+def _required_decimal_sum(lines: list[DeliveryLine], field: str) -> Decimal | None:
+    values = [getattr(line, field) for line in lines]
+    if any(value is None for value in values):
+        return None
+    return sum((value for value in values if value is not None), Decimal(0))
+
+
+def _physical_units_received(line: DeliveryLine) -> Decimal | None:
+    """Calculate physical containers without assuming Square's sellable unit.
+
+    For a nested pack such as ``2/12/355ML``, Square may track two 12-packs or
+    twenty-four cans. The invoice's TOTAL BOTTLES is the latter, so use the
+    largest explicit pack interpretation solely for this footer check.
+    """
+
+    if line.cases is None:
+        return line.loose_units
+    if line.loose_units is None:
+        return None
+    try:
+        physical_per_case = parse_pack(line.pack_text).units_per_case
+    except AmbiguousPack as exc:
+        physical_per_case = max(exc.candidates)
+    except PackError:
+        return None
+    return line.cases * Decimal(physical_per_case) + line.loose_units
+
+
+def _printed_total_comparison_issues(
+    *,
+    delivery: Delivery,
+    printed: Decimal,
+    actual: Decimal | None,
+    code: str,
+    label: str,
+) -> list[LineIssue]:
+    if actual is None:
+        return [
+            LineIssue(
+                str(delivery.id),
+                f"{code}_unverifiable",
+                (
+                    f"The invoice footer prints {_decimal_string(printed)} total {label}, "
+                    "but one or more included rows lacks the quantity or pack evidence "
+                    "needed to verify it. Correct those rows before posting stock."
+                ),
+            )
+        ]
+    if actual == printed:
+        return []
+    return [
+        LineIssue(
+            str(delivery.id),
+            f"{code}_mismatch",
+            (
+                f"The invoice footer prints {_decimal_string(printed)} total {label}, but "
+                f"the included rows add to {_decimal_string(actual)}. Check for a missing, "
+                "duplicated, excluded, or incorrectly read row before posting stock."
+            ),
+        )
+    ]
 
 
 def _projection_issues(lines: list[DeliveryLine]) -> list[LineIssue]:

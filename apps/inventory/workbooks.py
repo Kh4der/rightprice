@@ -22,16 +22,16 @@ from xml.etree import ElementTree as ET
 
 from django.conf import settings
 
-from .models import Delivery
+from .models import Delivery, DeliveryPricingPlan
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "4"
 DATA_SHEET = "Delivery"
 METADATA_SHEET = "Metadata"
 MAX_XLSX_BYTES = 10 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 40 * 1024 * 1024
 MAX_ROWS = 10_000
 
-HEADERS = (
+LEGACY_HEADERS_V3 = (
     "Line ID",
     "Position",
     "Vendor SKU",
@@ -39,6 +39,7 @@ HEADERS = (
     "Description",
     "Pack",
     "Cases",
+    "Loose units",
     "Units per case",
     "Received units",
     "Square count before",
@@ -56,6 +57,20 @@ HEADERS = (
     "Cost baseline source",
     "Invoice line total",
 )
+
+HEADERS = (
+    *LEGACY_HEADERS_V3,
+    "Pricing category",
+    "Markup %",
+    "Square selling price before",
+    "Proposed selling price",
+)
+
+# Schema 2 predates distributor CS/BT (case/bottle) support.  Keep its exact
+# shape readable so an already-exported, still-current owner workbook can be
+# imported with a blank loose-bottle quantity rather than becoming unusable.
+LEGACY_HEADERS_V2 = tuple(header for header in LEGACY_HEADERS_V3 if header != "Loose units")
+SUPPORTED_SCHEMA_VERSIONS = {"2", "3", SCHEMA_VERSION}
 
 _DANGEROUS_CELL_START = re.compile(r"^\s*[=+\-@]")
 _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -80,6 +95,7 @@ class WorkbookLine:
 
 @dataclass(frozen=True)
 class DeliveryWorkbook:
+    schema_version: str
     delivery_id: uuid.UUID
     revision: int
     line_count: int
@@ -112,9 +128,15 @@ def _line_ids(delivery: Delivery) -> list[str]:
     ]
 
 
-def workbook_signature(*, delivery_id: object, revision: int, line_ids: list[str]) -> str:
+def workbook_signature(
+    *,
+    delivery_id: object,
+    revision: int,
+    line_ids: list[str],
+    schema_version: str = SCHEMA_VERSION,
+) -> str:
     payload = "\n".join(
-        [SCHEMA_VERSION, str(delivery_id), str(revision), str(len(line_ids)), *line_ids]
+        [schema_version, str(delivery_id), str(revision), str(len(line_ids)), *line_ids]
     ).encode()
     return hmac.new(
         str(settings.SECRET_KEY).encode(), payload, digestmod=hashlib.sha256
@@ -123,6 +145,12 @@ def workbook_signature(*, delivery_id: object, revision: int, line_ids: list[str
 
 def export_workbook(delivery: Delivery) -> bytes:
     lines = list(delivery.lines.order_by("position", "id"))
+    pricing_plan = DeliveryPricingPlan.objects.filter(delivery=delivery).first()
+    pricing_rows = {
+        str(row.get("variation_id") or ""): row
+        for row in (pricing_plan.preview_lines if pricing_plan else [])
+        if isinstance(row, dict) and row.get("variation_id")
+    }
     if len(lines) > MAX_ROWS - 4:
         raise WorkbookValidationError("This delivery has too many lines for one workbook.")
     line_ids = [str(line.id) for line in lines]
@@ -134,8 +162,8 @@ def export_workbook(delivery: Delivery) -> bytes:
 
     title = f"Delivery {delivery.invoice_number or str(delivery.id)[:8]}"
     instructions = (
-        "Finalized owner-reviewed snapshot. Make corrections only in Store Ops; "
-        "this download cannot be uploaded back into the app."
+        "Finalized owner-reviewed snapshot of inventory and pricing. Make corrections only in "
+        "Store Ops; this download cannot be uploaded back into the app."
     )
     data_rows: list[list[object]] = [
         [title],
@@ -144,6 +172,7 @@ def export_workbook(delivery: Delivery) -> bytes:
         list(HEADERS),
     ]
     for line in lines:
+        pricing = pricing_rows.get(line.square_catalog_variation_id, {})
         data_rows.append(
             [
                 str(line.id),
@@ -153,6 +182,7 @@ def export_workbook(delivery: Delivery) -> bytes:
                 safe_excel_text(line.description),
                 safe_excel_text(line.pack_text),
                 line.cases,
+                line.loose_units,
                 line.units_per_case,
                 line.received_units,
                 line.square_count_before,
@@ -169,6 +199,10 @@ def export_workbook(delivery: Delivery) -> bytes:
                 line.unit_cost_change_display,
                 safe_excel_text(line.square_unit_cost_source),
                 _money_value(line.line_total_cents),
+                safe_excel_text(pricing.get("category", "")),
+                _decimal_value(pricing.get("markup_percent")),
+                _money_value(pricing.get("current_price_cents")),
+                _money_value(pricing.get("target_price_cents")),
             ]
         )
 
@@ -183,8 +217,22 @@ def export_workbook(delivery: Delivery) -> bytes:
     return _build_xlsx(data_rows=data_rows, metadata_rows=metadata_rows)
 
 
-def _money_value(cents: int | None) -> Decimal | None:
-    return Decimal(cents) / 100 if cents is not None else None
+def _money_value(cents: object) -> Decimal | None:
+    if cents is None or isinstance(cents, bool):
+        return None
+    try:
+        return Decimal(str(cents)) / 100
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _decimal_value(value: object) -> Decimal | None:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
 
 
 def _build_xlsx(*, data_rows: list[list[object]], metadata_rows: list[list[object]]) -> bytes:
@@ -311,8 +359,9 @@ def _worksheet_xml(rows: list[list[object]], *, is_data_sheet: bool) -> str:
     extras = ""
     if is_data_sheet:
         last_row = max(len(rows), 4)
+        last_column = _column_letters(len(HEADERS))
         extras = f"""
-  <autoFilter ref="A4:W{last_row}"/>"""
+  <autoFilter ref="A4:{last_column}{last_row}"/>"""
         sheet_views = """<sheetViews><sheetView workbookViewId="0"><pane ySplit="4" topLeftCell="A5" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="C5" sqref="C5"/></sheetView></sheetViews>"""
         columns = """<cols>
     <col min="1" max="1" width="4" hidden="1" customWidth="1"/>
@@ -320,16 +369,19 @@ def _worksheet_xml(rows: list[list[object]], *, is_data_sheet: bool) -> str:
     <col min="3" max="4" width="17" customWidth="1"/>
     <col min="5" max="5" width="38" customWidth="1"/>
     <col min="6" max="6" width="14" customWidth="1"/>
-    <col min="7" max="9" width="14" customWidth="1"/>
-    <col min="10" max="12" width="19" customWidth="1"/>
-    <col min="13" max="13" width="28" customWidth="1"/>
-    <col min="14" max="14" width="32" customWidth="1"/>
-    <col min="15" max="16" width="15" customWidth="1"/>
-    <col min="17" max="17" width="38" customWidth="1"/>
-    <col min="18" max="20" width="20" customWidth="1"/>
-    <col min="21" max="21" width="17" customWidth="1"/>
-    <col min="22" max="22" width="30" customWidth="1"/>
-    <col min="23" max="23" width="20" customWidth="1"/>
+    <col min="7" max="10" width="14" customWidth="1"/>
+    <col min="11" max="13" width="19" customWidth="1"/>
+    <col min="14" max="14" width="28" customWidth="1"/>
+    <col min="15" max="15" width="32" customWidth="1"/>
+    <col min="16" max="17" width="15" customWidth="1"/>
+    <col min="18" max="18" width="38" customWidth="1"/>
+    <col min="19" max="21" width="20" customWidth="1"/>
+    <col min="22" max="22" width="17" customWidth="1"/>
+    <col min="23" max="23" width="30" customWidth="1"/>
+    <col min="24" max="24" width="20" customWidth="1"/>
+    <col min="25" max="25" width="26" customWidth="1"/>
+    <col min="26" max="26" width="14" customWidth="1"/>
+    <col min="27" max="28" width="24" customWidth="1"/>
   </cols>"""
     else:
         sheet_views = '<sheetViews><sheetView workbookViewId="0"/></sheetViews>'
@@ -354,11 +406,11 @@ def _cell_style(row: int, column: int, *, is_data_sheet: bool) -> int:
         return 0
     if column in {1, 2}:
         return 3
-    if column in {10, 11, 12, 16, 21}:
+    if column in {11, 12, 13, 17, 22}:
         return 6
-    if column in {7, 9}:
+    if column in {7, 8, 10}:
         return 5
-    if column in {18, 19, 20, 23}:
+    if column in {19, 20, 21, 24, 27, 28}:
         return 7
     return 4
 
@@ -419,7 +471,8 @@ def read_workbook(upload: object) -> DeliveryWorkbook:
         raise WorkbookValidationError(
             f"Workbook metadata is incomplete: missing {', '.join(sorted(missing))}."
         )
-    if str(metadata["schema_version"]) != SCHEMA_VERSION:
+    schema_version = str(metadata["schema_version"])
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise WorkbookValidationError("This workbook version is not supported.")
 
     try:
@@ -431,12 +484,19 @@ def read_workbook(upload: object) -> DeliveryWorkbook:
             raise
         raise WorkbookValidationError("Workbook metadata contains invalid values.") from exc
 
-    lines = _data_lines(data_rows)
+    if schema_version == SCHEMA_VERSION:
+        headers = HEADERS
+    elif schema_version == "3":
+        headers = LEGACY_HEADERS_V3
+    else:
+        headers = LEGACY_HEADERS_V2
+    lines = _data_lines(data_rows, headers=headers)
     if len(lines) != line_count:
         raise WorkbookValidationError(
             f"Workbook declares {line_count} lines but contains {len(lines)}."
         )
     return DeliveryWorkbook(
+        schema_version=schema_version,
         delivery_id=delivery_id,
         revision=revision,
         line_count=line_count,
@@ -596,14 +656,18 @@ def _metadata_values(rows: dict[int, dict[int, object]]) -> dict[str, object]:
     return result
 
 
-def _data_lines(rows: dict[int, dict[int, object]]) -> list[WorkbookLine]:
+def _data_lines(
+    rows: dict[int, dict[int, object]],
+    *,
+    headers: tuple[str, ...] = HEADERS,
+) -> list[WorkbookLine]:
     header_row = None
     for row_number in sorted(rows):
         row = rows[row_number]
         if row.get(1) == HEADERS[0]:
             header_row = row_number
-            actual_headers = tuple(row.get(index) for index in range(1, len(HEADERS) + 1))
-            if actual_headers != HEADERS:
+            actual_headers = tuple(row.get(index) for index in range(1, len(headers) + 1))
+            if actual_headers != headers:
                 raise WorkbookValidationError(
                     "Delivery workbook columns were changed; export a fresh copy."
                 )
@@ -614,9 +678,10 @@ def _data_lines(rows: dict[int, dict[int, object]]) -> list[WorkbookLine]:
     result: list[WorkbookLine] = []
     for row_number in sorted(number for number in rows if number > header_row):
         row = rows[row_number]
-        if all(row.get(index) in {None, ""} for index in range(1, len(HEADERS) + 1)):
+        if all(row.get(index) in {None, ""} for index in range(1, len(headers) + 1)):
             continue
-        values = {header: row.get(index) for index, header in enumerate(HEADERS, start=1)}
+        values = {header: row.get(index) for index, header in enumerate(headers, start=1)}
+        values.setdefault("Loose units", None)
         result.append(WorkbookLine(row_number=row_number, values=values))
     return result
 

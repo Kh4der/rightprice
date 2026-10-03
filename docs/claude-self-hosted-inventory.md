@@ -195,7 +195,13 @@ Only these outputs are accepted:
 /workspace/output/corrected-inventory.xlsx
 ```
 
-The JSON must validate against the strict `DeliveryInvoice` evidence schema.
+The JSON must validate against the strict `SandboxDeliveryInvoiceResult`
+evidence schema. In addition to the aggregate invoice, it must contain exactly
+one source identity entry for every immutable document UUID in the manifest.
+The trusted host rejects missing, repeated, extra, or conflicting per-photo
+invoice numbers, vendors, and dates before it creates any draft lines. Each
+document stores only its own identity evidence, so an aggregate header cannot
+hide a mixed-invoice upload from later readiness checks.
 The XLSX must be a real workbook with bounded expanded size and no formulas,
 macros, embedded objects, or external links. It is copied to the app's private
 storage path `inventory-sandbox/<job-uuid>/corrected-inventory.xlsx`; there is

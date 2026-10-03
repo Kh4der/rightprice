@@ -92,6 +92,17 @@ def test_capture_forms_render_the_camera_widget(client, employee, url_name):
     assert b"Take photo or choose file" in response.content
 
 
+def test_inventory_capture_explains_long_receipt_overlap(client, employee):
+    client.force_login(employee)
+
+    response = client.get(reverse("capture:inventory"))
+
+    assert response.status_code == 200
+    assert b"Move down in order" in response.content
+    assert b"repeat one complete product row" in response.content
+    assert b"Use a new submission for another invoice" in response.content
+
+
 def test_inventory_navigation_is_visible_to_owner_and_employee(client, owner, employee):
     inventory_url = reverse("capture:inventory").encode()
 

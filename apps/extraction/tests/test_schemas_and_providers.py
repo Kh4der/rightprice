@@ -7,12 +7,14 @@ import pytest
 from pydantic import ValidationError
 
 from apps.extraction.providers import (
+    DELIVERY_INVOICE_EXTRACTION_PROMPT,
     FakeVisionProvider,
     OpenAIVisionProvider,
     ProviderResponseError,
 )
 from apps.extraction.schemas import (
     ClassifiedDocumentType,
+    DeliveryInvoice,
     DocumentClassification,
     EvidenceValue,
     SquareDrawer,
@@ -58,6 +60,23 @@ def drawer_payload():
         "expected_in_drawer_cents": observed(29_991, "$299.91"),
         "counted_cash_cents": absent(),
         "over_short_cents": absent(),
+    }
+
+
+def invoice_payload():
+    return {
+        "vendor_name": observed("Distributor"),
+        "invoice_number": observed("INV-1"),
+        "invoice_date": observed("2026-09-26"),
+        "purchase_order_number": absent(),
+        "lines": [],
+        "printed_total_cases": absent(),
+        "printed_total_loose_units": absent(),
+        "printed_total_physical_units": absent(),
+        "subtotal_cents": absent(),
+        "tax_cents": absent(),
+        "fees_cents": absent(),
+        "invoice_total_cents": absent(),
     }
 
 
@@ -143,6 +162,40 @@ def test_openai_adapter_uses_responses_parse_with_pydantic_and_data_url():
     image_part = responses.kwargs["input"][1]["content"][1]
     assert image_part["image_url"].startswith("data:image/jpeg;base64,")
     assert image_part["detail"] == "high"
+
+
+def test_delivery_adapter_explains_real_distributor_columns_and_overlaps():
+    responses = RecordingResponses(DeliveryInvoice.model_validate(invoice_payload()))
+    provider = OpenAIVisionProvider(
+        client=SimpleNamespace(responses=responses),
+        classification_model="classifier-test",
+        extraction_model="extractor-test",
+    )
+
+    provider.extract(
+        b"jpeg bytes",
+        media_type="image/jpeg",
+        document_type=ClassifiedDocumentType.DELIVERY_INVOICE,
+        schema=DeliveryInvoice,
+    )
+
+    system_prompt = responses.kwargs["input"][0]["content"]
+    assert DELIVERY_INVOICE_EXTRACTION_PROMPT in system_prompt
+    assert "CS/BT" in system_prompt
+    assert "BPC and QPC" in system_prompt
+    assert "overlapping section" in system_prompt
+    assert "Keep that product row in `lines`" in system_prompt
+    assert "zero price or zero total alone" in system_prompt
+    assert "TOTAL CS/BTLS" in system_prompt
+    assert (
+        "loose_units"
+        in DeliveryInvoice.model_json_schema()["$defs"]["DeliveryInvoiceLine"]["properties"]
+    )
+    assert {
+        "printed_total_cases",
+        "printed_total_loose_units",
+        "printed_total_physical_units",
+    } <= DeliveryInvoice.model_json_schema()["properties"].keys()
 
 
 def test_openai_adapter_rejects_an_empty_structured_response():

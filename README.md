@@ -129,6 +129,30 @@ absolute on-hand count and would be unsafe for a delivery. Only positive,
 whole-unit receipts are currently supported; returns and correction workflows
 are not implemented.
 
+### Owner selling-price flow
+
+Selling prices are optional and stay separate from inventory quantities. On a
+reviewed delivery, an owner can enter one percentage for every invoice product,
+then override it for categories such as Wine, Vodka, Gin, Rum, Tequila / Mezcal,
+or Whiskey / Bourbon / Scotch. A one-product percentage has the highest
+priority. The calculation is:
+
+```text
+invoice unit cost × (1 + markup percentage) = proposed Square selling price
+```
+
+The preview shows the invoice cost, rule used, current Square price, and proposed
+price for every matched variation. It never automatically lowers an existing
+Square price. Variable-price items and unsafe or stale products are skipped or
+blocked visibly. The owner must approve the evidence and confirm a second,
+price-specific action before anything is sent.
+
+Price posting uses its own `SQUARE_CATALOG_PRICE_WRITES_ENABLED` gate. It fetches
+the full live Square variations again, refuses version/price drift, preserves
+all fields required by Square's full-replacement Catalog API, and retries only
+the same immutable idempotent request. The finalized Excel snapshot includes
+the chosen pricing category, markup, prior Square price, and proposed price.
+
 ### Square team member mapping
 
 `login_code` plus the hashed PIN/password is the application's login identity.
@@ -290,6 +314,7 @@ these safety settings in place at first:
 ```dotenv
 SQUARE_ENVIRONMENT=sandbox
 SQUARE_INVENTORY_WRITES_ENABLED=false
+SQUARE_CATALOG_PRICE_WRITES_ENABLED=false
 ```
 
 Check the connection without writing anything:
@@ -309,6 +334,13 @@ count, idempotent retry, and post-write verification result. Only then set:
 
 ```dotenv
 SQUARE_INVENTORY_WRITES_ENABLED=true
+```
+
+Validate selling-price previews and stale-price blocking separately before
+enabling that independent write path:
+
+```dotenv
+SQUARE_CATALOG_PRICE_WRITES_ENABLED=true
 ```
 
 Do not switch to `SQUARE_ENVIRONMENT=production` until the production checklist

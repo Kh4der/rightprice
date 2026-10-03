@@ -7,6 +7,7 @@ from .models import (
     CatalogMapping,
     Delivery,
     DeliveryLine,
+    DeliveryPricingPlan,
     InventorySandboxJob,
     SquareCatalogVariation,
     Vendor,
@@ -43,6 +44,20 @@ class DeliveryAdmin(ReadOnlyOperationalAdmin):
     list_display = ("invoice_number", "vendor_name_raw", "status", "created_at", "pushed_at")
     list_filter = ("status",)
     inlines = (DeliveryLineInline,)
+
+
+@admin.register(DeliveryPricingPlan)
+class DeliveryPricingPlanAdmin(ReadOnlyOperationalAdmin):
+    list_display = (
+        "delivery",
+        "status",
+        "default_markup_percent",
+        "revision",
+        "prepared_at",
+        "pushed_at",
+    )
+    list_filter = ("status",)
+    search_fields = ("delivery__invoice_number", "idempotency_key")
 
 
 @admin.register(SquareCatalogVariation)

@@ -132,7 +132,9 @@ class BaseCaptureForm(forms.Form):
 
         value = self.cleaned_data.get("staged_uploads") or {}
         if not isinstance(value, dict):
-            raise forms.ValidationError("The staged photo list is invalid. Choose the photos again.")
+            raise forms.ValidationError(
+                "The staged photo list is invalid. Choose the photos again."
+            )
 
         normalized: dict[str, list[str]] = {}
         seen: set[uuid.UUID] = set()
@@ -251,7 +253,10 @@ class InventoryCaptureForm(BaseCaptureForm):
         required=False,
         validators=[],
         widget=MultipleCameraInput(attrs={"data-max-files": "12"}),
-        help_text="Add every page, one document per photo.",
+        help_text=(
+            "Use one invoice per submission. For a long receipt, take photos from top to "
+            "bottom and repeat one full product row between photos."
+        ),
     )
     vendor_name = forms.CharField(label="Distributor", required=False, max_length=160)
 

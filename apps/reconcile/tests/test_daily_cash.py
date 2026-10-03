@@ -393,7 +393,10 @@ def test_weekly_page_lists_daily_cash_and_totals_only_counted_days(
         {"amount": "335.00", "note": "Tuesday cash"},
     )
 
-    response = client.get(reverse("reconcile:daily-cash"))
+    response = client.get(
+        reverse("reconcile:daily-cash"),
+        {"week": "2026-09-21"},
+    )
 
     assert response.status_code == 200
     assert len(response.context["rows"]) == 3

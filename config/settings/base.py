@@ -312,9 +312,13 @@ SQUARE_INVENTORY_COST_WRITES_ENABLED = env.bool(
 # Creating a catalog item is a separate, rarer mutation and requires its own
 # explicit sandbox-tested owner gate.
 SQUARE_CATALOG_WRITES_ENABLED = env.bool("SQUARE_CATALOG_WRITES_ENABLED", default=False)
-SQUARE_CATALOG_CREATE_STALE_SECONDS = env.int(
-    "SQUARE_CATALOG_CREATE_STALE_SECONDS", default=900
+# Existing-item retail price changes are more expansive than creating one
+# explicitly reviewed item, so they have an independent production gate.
+SQUARE_CATALOG_PRICE_WRITES_ENABLED = env.bool("SQUARE_CATALOG_PRICE_WRITES_ENABLED", default=False)
+SQUARE_CATALOG_PRICE_PUSH_STALE_SECONDS = env.int(
+    "SQUARE_CATALOG_PRICE_PUSH_STALE_SECONDS", default=900
 )
+SQUARE_CATALOG_CREATE_STALE_SECONDS = env.int("SQUARE_CATALOG_CREATE_STALE_SECONDS", default=900)
 # A PUSHING delivery keeps its committed request keys. Only after this quiet
 # period can an owner resume those exact keys following a process crash.
 SQUARE_PUSH_STALE_SECONDS = env.int("SQUARE_PUSH_STALE_SECONDS", default=900)
@@ -377,21 +381,15 @@ GOOGLE_GENAI_API_KEY = env("GOOGLE_GENAI_API_KEY", default="")
 # uses ANTHROPIC_API_KEY only to create a session.  The isolated worker must be
 # launched with an ANTHROPIC_ENVIRONMENT_KEY instead and must never inherit this
 # Django process's database, storage, or Square credentials.
-CLAUDE_INVENTORY_SANDBOX_ENABLED = env.bool(
-    "CLAUDE_INVENTORY_SANDBOX_ENABLED", default=False
-)
+CLAUDE_INVENTORY_SANDBOX_ENABLED = env.bool("CLAUDE_INVENTORY_SANDBOX_ENABLED", default=False)
 # When enabled, inventory uploads use the self-hosted Managed Agents path
 # instead of also spending on the ordinary extraction provider.
-CLAUDE_INVENTORY_SANDBOX_PRIMARY = env.bool(
-    "CLAUDE_INVENTORY_SANDBOX_PRIMARY", default=False
-)
+CLAUDE_INVENTORY_SANDBOX_PRIMARY = env.bool("CLAUDE_INVENTORY_SANDBOX_PRIMARY", default=False)
 CLAUDE_INVENTORY_AGENT_ID = env("CLAUDE_INVENTORY_AGENT_ID", default="")
 CLAUDE_INVENTORY_ENVIRONMENT_ID = env("CLAUDE_INVENTORY_ENVIRONMENT_ID", default="")
 # Managed Agents budgets use minor currency units represented as a decimal
 # string.  The default is a hard $2.50 list-cost ceiling per invoice session.
-CLAUDE_INVENTORY_MAX_COST_CENTS = env.int(
-    "CLAUDE_INVENTORY_MAX_COST_CENTS", default=250
-)
+CLAUDE_INVENTORY_MAX_COST_CENTS = env.int("CLAUDE_INVENTORY_MAX_COST_CENTS", default=250)
 CLAUDE_INVENTORY_MAX_RESULT_JSON_BYTES = env.int(
     "CLAUDE_INVENTORY_MAX_RESULT_JSON_BYTES", default=2 * 1024 * 1024
 )
@@ -403,9 +401,7 @@ CLAUDE_INVENTORY_MAX_WORKBOOK_BYTES = env.int(
 # host with access to Django's protected storage and a local Docker daemon.  The
 # Anthropic environment key is read directly by the management command at run
 # time and is intentionally not a Django setting.
-CLAUDE_INVENTORY_LAUNCHER_ENABLED = env.bool(
-    "CLAUDE_INVENTORY_LAUNCHER_ENABLED", default=False
-)
+CLAUDE_INVENTORY_LAUNCHER_ENABLED = env.bool("CLAUDE_INVENTORY_LAUNCHER_ENABLED", default=False)
 CLAUDE_INVENTORY_WORKSPACE_ROOT = env(
     "CLAUDE_INVENTORY_WORKSPACE_ROOT",
     default="/var/lib/store-ops/claude-inventory",
@@ -419,21 +415,11 @@ CLAUDE_INVENTORY_DOCKER_PYTHON = env(
 CLAUDE_INVENTORY_DOCKER_REQUIRE_DIGEST = env.bool(
     "CLAUDE_INVENTORY_DOCKER_REQUIRE_DIGEST", default=True
 )
-CLAUDE_INVENTORY_DOCKER_MEMORY = env(
-    "CLAUDE_INVENTORY_DOCKER_MEMORY", default="1g"
-)
-CLAUDE_INVENTORY_DOCKER_CPUS = env(
-    "CLAUDE_INVENTORY_DOCKER_CPUS", default="1.0"
-)
-CLAUDE_INVENTORY_DOCKER_PIDS_LIMIT = env.int(
-    "CLAUDE_INVENTORY_DOCKER_PIDS_LIMIT", default=128
-)
-CLAUDE_INVENTORY_RUN_TIMEOUT_SECONDS = env.int(
-    "CLAUDE_INVENTORY_RUN_TIMEOUT_SECONDS", default=900
-)
-CLAUDE_INVENTORY_STOP_TIMEOUT_SECONDS = env.int(
-    "CLAUDE_INVENTORY_STOP_TIMEOUT_SECONDS", default=45
-)
+CLAUDE_INVENTORY_DOCKER_MEMORY = env("CLAUDE_INVENTORY_DOCKER_MEMORY", default="1g")
+CLAUDE_INVENTORY_DOCKER_CPUS = env("CLAUDE_INVENTORY_DOCKER_CPUS", default="1.0")
+CLAUDE_INVENTORY_DOCKER_PIDS_LIMIT = env.int("CLAUDE_INVENTORY_DOCKER_PIDS_LIMIT", default=128)
+CLAUDE_INVENTORY_RUN_TIMEOUT_SECONDS = env.int("CLAUDE_INVENTORY_RUN_TIMEOUT_SECONDS", default=900)
+CLAUDE_INVENTORY_STOP_TIMEOUT_SECONDS = env.int("CLAUDE_INVENTORY_STOP_TIMEOUT_SECONDS", default=45)
 CLAUDE_INVENTORY_RETAIN_FAILED_WORKSPACES = env.bool(
     "CLAUDE_INVENTORY_RETAIN_FAILED_WORKSPACES", default=False
 )

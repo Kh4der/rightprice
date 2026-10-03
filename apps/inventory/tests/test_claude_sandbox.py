@@ -176,7 +176,7 @@ def test_dispatch_passes_only_opaque_metadata_and_no_resources(delivery_with_inv
     assert call["budget"]["max_list_cost"] == {"amount": "175", "currency": "USD"}
     assert call["metadata"] == {
         "inventory_job_id": str(job.id),
-        "workflow_version": "inventory_invoice_v1",
+        "workflow_version": "inventory_invoice_v3",
     }
     assert "resources" not in call
     assert "vault_ids" not in call
@@ -216,6 +216,8 @@ def test_stage_uses_fixed_paths_and_rechecks_immutable_hash(
     assert manifest["documents"][0]["source_sha256"] == document.sha256
     assert manifest["documents"][0]["media_type"] == "image/jpeg"
     assert "exif_transpose" in manifest["documents"][0]["preprocessing_steps"]
+    schema = json.loads((staged / manifest["schema_path"]).read_text(encoding="utf-8"))
+    assert "source_documents" in schema["required"]
     assert document.file.name not in (staged / MANIFEST_NAME).read_text(encoding="utf-8")
     assert validate_staged_workspace(staged, str(job.id)) == manifest
     assert AuditEvent.objects.filter(action="inventory.sandbox_staged").exists()
@@ -297,7 +299,7 @@ def test_one_shot_worker_validates_session_and_scrubs_environment_key(
             return SimpleNamespace(
                 metadata={
                     "inventory_job_id": str(job.id),
-                    "workflow_version": "inventory_invoice_v1",
+                    "workflow_version": "inventory_invoice_v3",
                 }
             )
 
@@ -354,12 +356,21 @@ def _evidence(value=None, *, present=False):
     }
 
 
-def _valid_invoice_result():
+def _valid_invoice_result(document_ids):
     return {
         "vendor_name": _evidence("Distributor", present=True),
         "invoice_number": _evidence("INV-SANDBOX", present=True),
         "invoice_date": _evidence(dt.date(2026, 9, 26).isoformat(), present=True),
         "purchase_order_number": _evidence(),
+        "source_documents": [
+            {
+                "document_id": str(document_id),
+                "vendor_name": _evidence("Distributor", present=True),
+                "invoice_number": _evidence("INV-SANDBOX", present=True),
+                "invoice_date": _evidence(dt.date(2026, 9, 26).isoformat(), present=True),
+            }
+            for document_id in document_ids
+        ],
         "lines": [
             {
                 "line_number": _evidence(1, present=True),
@@ -368,11 +379,15 @@ def _valid_invoice_result():
                 "description": _evidence("Claude Bourbon 750ml", present=True),
                 "pack_text": _evidence("12/750ML", present=True),
                 "cases": _evidence("1", present=True),
+                "loose_units": _evidence("0", present=True),
                 "stated_units": _evidence("12", present=True),
                 "unit_cost_cents": _evidence(500, present=True),
                 "line_total_cents": _evidence(6000, present=True),
             }
         ],
+        "printed_total_cases": _evidence("1", present=True),
+        "printed_total_loose_units": _evidence("0", present=True),
+        "printed_total_physical_units": _evidence("12", present=True),
         "subtotal_cents": _evidence(),
         "tax_cents": _evidence(),
         "fees_cents": _evidence(),
@@ -435,7 +450,7 @@ def test_ingest_validates_json_and_stores_workbook_in_fixed_private_path(
     job = dispatch_inventory_sandbox_job(delivery, requested_by=owner, client=FakeCreateClient())
     workspace = stage_inventory_sandbox_workspace(job, tmp_path / "ingest-space")
     (workspace / RESULT_JSON_PATH).write_text(
-        json.dumps(_valid_invoice_result()),
+        json.dumps(_valid_invoice_result([_document.id])),
         encoding="utf-8",
     )
     workbook = _values_only_workbook()
@@ -445,9 +460,7 @@ def test_ingest_validates_json_and_stores_workbook_in_fixed_private_path(
 
     job.refresh_from_db()
     assert job.status == InventorySandboxJobStatus.SUCCEEDED
-    assert job.output_workbook.name == (
-        f"inventory-sandbox/{job.id}/corrected-inventory.xlsx"
-    )
+    assert job.output_workbook.name == (f"inventory-sandbox/{job.id}/corrected-inventory.xlsx")
     assert job.output_sha256 == hashlib.sha256(workbook).hexdigest()
     assert job.output_size_bytes == len(workbook)
     assert job.extracted_result["invoice_number"]["value"] == "INV-SANDBOX"
@@ -456,6 +469,9 @@ def test_ingest_validates_json_and_stores_workbook_in_fixed_private_path(
     assert line.description == "Claude Bourbon 750ml"
     assert line.received_units == 12
     assert line.unit_cost_cents == 500
+    assert delivery.printed_total_cases == 1
+    assert delivery.printed_total_loose_units == 0
+    assert delivery.printed_total_physical_units == 12
     assert delivery.submission.status == "READY"
     assert delivery.submission.documents.get().status == "EXTRACTED"
     assert AuditEvent.objects.filter(action="inventory.sandbox_succeeded").exists()
@@ -471,11 +487,11 @@ def test_ingest_rejects_numbers_that_cannot_fit_delivery_storage(
     owner,
     tmp_path,
 ):
-    delivery, _document = delivery_with_invoice
+    delivery, document = delivery_with_invoice
     delivery.lines.all().delete()
     job = dispatch_inventory_sandbox_job(delivery, requested_by=owner, client=FakeCreateClient())
     workspace = stage_inventory_sandbox_workspace(job, tmp_path / "overflow-space")
-    result = _valid_invoice_result()
+    result = _valid_invoice_result([document.id])
     result["lines"][0]["cases"] = _evidence("1000000000.000", present=True)
     (workspace / RESULT_JSON_PATH).write_text(json.dumps(result), encoding="utf-8")
     (workspace / RESULT_XLSX_PATH).write_bytes(_values_only_workbook())
@@ -490,3 +506,138 @@ def test_ingest_rejects_numbers_that_cannot_fit_delivery_storage(
     assert delivery.lines.count() == 0
     assert delivery.submission.status == "NEEDS_REVIEW"
     assert "original photos are saved" in delivery.submission.processing_error
+
+
+def _add_invoice_photo(delivery: Delivery, *, name: str) -> Document:
+    evidence = _invoice_image_bytes()
+    return Document.objects.create(
+        submission=delivery.submission,
+        file=SimpleUploadedFile(name, evidence, content_type="image/jpeg"),
+        original_name=name,
+        media_type="image/jpeg",
+        size_bytes=len(evidence),
+        sha256=hashlib.sha256(evidence).hexdigest(),
+        requested_type=DocumentType.DELIVERY_INVOICE,
+    )
+
+
+@override_settings(
+    CLAUDE_INVENTORY_SANDBOX_ENABLED=True,
+    CLAUDE_INVENTORY_AGENT_ID="agent_test",
+    CLAUDE_INVENTORY_ENVIRONMENT_ID="env_test",
+)
+def test_ingest_rejects_conflicting_per_photo_invoice_identities_before_materializing(
+    delivery_with_invoice,
+    owner,
+    tmp_path,
+):
+    delivery, first = delivery_with_invoice
+    delivery.lines.all().delete()
+    second = _add_invoice_photo(delivery, name="other-invoice.jpg")
+    job = dispatch_inventory_sandbox_job(delivery, requested_by=owner, client=FakeCreateClient())
+    workspace = stage_inventory_sandbox_workspace(job, tmp_path / "mixed-invoice-space")
+    result = _valid_invoice_result([first.id, second.id])
+    result["source_documents"][1]["invoice_number"] = _evidence("INV-DIFFERENT", present=True)
+    (workspace / RESULT_JSON_PATH).write_text(json.dumps(result), encoding="utf-8")
+    (workspace / RESULT_XLSX_PATH).write_bytes(_values_only_workbook())
+
+    with pytest.raises(InventorySandboxOutputError, match="different invoices"):
+        ingest_inventory_sandbox_outputs(job, workspace)
+
+    job.refresh_from_db()
+    delivery.submission.refresh_from_db()
+    first.refresh_from_db()
+    second.refresh_from_db()
+    assert job.status == InventorySandboxJobStatus.FAILED
+    assert delivery.lines.count() == 0
+    assert first.extracted_data == {}
+    assert second.extracted_data == {}
+    assert delivery.submission.status == "NEEDS_REVIEW"
+
+
+@override_settings(
+    CLAUDE_INVENTORY_SANDBOX_ENABLED=True,
+    CLAUDE_INVENTORY_AGENT_ID="agent_test",
+    CLAUDE_INVENTORY_ENVIRONMENT_ID="env_test",
+)
+def test_ingest_requires_exactly_one_identity_entry_for_every_staged_photo(
+    delivery_with_invoice,
+    owner,
+    tmp_path,
+):
+    delivery, first = delivery_with_invoice
+    delivery.lines.all().delete()
+    _add_invoice_photo(delivery, name="continuation.jpg")
+    job = dispatch_inventory_sandbox_job(delivery, requested_by=owner, client=FakeCreateClient())
+    workspace = stage_inventory_sandbox_workspace(job, tmp_path / "missing-source-space")
+    (workspace / RESULT_JSON_PATH).write_text(
+        json.dumps(_valid_invoice_result([first.id])),
+        encoding="utf-8",
+    )
+    (workspace / RESULT_XLSX_PATH).write_bytes(_values_only_workbook())
+
+    with pytest.raises(InventorySandboxOutputError, match="every invoice photo"):
+        ingest_inventory_sandbox_outputs(job, workspace)
+
+    job.refresh_from_db()
+    assert job.status == InventorySandboxJobStatus.FAILED
+    assert delivery.lines.count() == 0
+
+
+@override_settings(
+    CLAUDE_INVENTORY_SANDBOX_ENABLED=True,
+    CLAUDE_INVENTORY_AGENT_ID="agent_test",
+    CLAUDE_INVENTORY_ENVIRONMENT_ID="env_test",
+)
+def test_ingest_rejects_aggregate_identity_not_supported_by_a_source_photo(
+    delivery_with_invoice,
+    owner,
+    tmp_path,
+):
+    delivery, document = delivery_with_invoice
+    delivery.lines.all().delete()
+    job = dispatch_inventory_sandbox_job(delivery, requested_by=owner, client=FakeCreateClient())
+    workspace = stage_inventory_sandbox_workspace(job, tmp_path / "unsupported-aggregate-space")
+    result = _valid_invoice_result([document.id])
+    result["invoice_number"] = _evidence("INVENTED-AGGREGATE", present=True)
+    (workspace / RESULT_JSON_PATH).write_text(json.dumps(result), encoding="utf-8")
+    (workspace / RESULT_XLSX_PATH).write_bytes(_values_only_workbook())
+
+    with pytest.raises(InventorySandboxOutputError, match="aggregate invoice number"):
+        ingest_inventory_sandbox_outputs(job, workspace)
+
+    job.refresh_from_db()
+    assert job.status == InventorySandboxJobStatus.FAILED
+    assert delivery.lines.count() == 0
+
+
+@override_settings(
+    CLAUDE_INVENTORY_SANDBOX_ENABLED=True,
+    CLAUDE_INVENTORY_AGENT_ID="agent_test",
+    CLAUDE_INVENTORY_ENVIRONMENT_ID="env_test",
+)
+def test_ingest_stores_source_specific_identity_instead_of_aggregate_on_every_photo(
+    delivery_with_invoice,
+    owner,
+    tmp_path,
+):
+    delivery, header = delivery_with_invoice
+    delivery.lines.all().delete()
+    continuation = _add_invoice_photo(delivery, name="continuation.jpg")
+    job = dispatch_inventory_sandbox_job(delivery, requested_by=owner, client=FakeCreateClient())
+    workspace = stage_inventory_sandbox_workspace(job, tmp_path / "source-results-space")
+    result = _valid_invoice_result([header.id, continuation.id])
+    for field in ("vendor_name", "invoice_number", "invoice_date"):
+        result["source_documents"][1][field] = _evidence()
+    (workspace / RESULT_JSON_PATH).write_text(json.dumps(result), encoding="utf-8")
+    (workspace / RESULT_XLSX_PATH).write_bytes(_values_only_workbook())
+
+    ingest_inventory_sandbox_outputs(job, workspace)
+
+    header.refresh_from_db()
+    continuation.refresh_from_db()
+    assert header.extracted_data["result"]["invoice_number"]["value"] == "INV-SANDBOX"
+    assert continuation.extracted_data["result"]["invoice_number"]["value"] is None
+    assert "lines" not in header.extracted_data["result"]
+    assert "lines" not in continuation.extracted_data["result"]
+    assert delivery.lines.count() == 1

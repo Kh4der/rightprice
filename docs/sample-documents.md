@@ -336,8 +336,9 @@ the field correctly; the result still needs evidence and deterministic checks.
 - A day with real lottery activity: non-zero `PAYS`, settled books, and a
   `RANGE` with both endpoints, to pin down the serial-direction question.
 - Whether draw-game (online) sales appear on a separate terminal report.
-- A representative distributor delivery invoice, including pack and charge
-  lines, for the inventory flow.
+- A privacy-safe image fixture derived from the privately reviewed Johnson and
+  Southern distributor layouts. The original merchant invoices must remain out
+  of the repository because they contain account, address, and signature data.
 - A real lottery payout document for the payout flow.
 - Results from the configured OpenAI model and the intended Square account;
   automated tests use fakes and do not supply live credentials.

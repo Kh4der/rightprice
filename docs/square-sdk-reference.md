@@ -214,6 +214,34 @@ Store Ops reads only `IN_STOCK` counts. It first records
 `count before + reviewed delivery delta = projected count`, then reads the count
 again after an adjustment and stores any drift.
 
+## Catalog selling prices
+
+An existing fixed selling price is
+`CatalogItemVariation.item_variation_data.price_money`. A configured location
+can override it through `location_overrides[].price_money`; Store Ops reads and
+updates that effective scope rather than accidentally changing the global price.
+
+The installed SDK calls are:
+
+```python
+live = client.catalog.batch_get(
+    object_ids=variation_ids,
+    include_related_objects=False,
+)
+result = client.catalog.batch_upsert(
+    idempotency_key=saved_key,
+    batches=[{"objects": full_variation_objects}],
+)
+```
+
+Square Catalog updates use full-replacement semantics. Every price update must
+therefore start from the current complete variation object, preserve its fields,
+send `id`, `type`, `version`, and `item_variation_data.item_id`, and alter only
+the intended price amount. Store Ops re-reads every object immediately before
+the write and blocks version, price, pricing-type, or location-scope drift. The
+token needs `ITEMS_WRITE`. The local price writer sends at most 1,000 variations
+in one atomic batch and reuses the persisted idempotency key on retry.
+
 ## Cash drawer shifts
 
 ```python

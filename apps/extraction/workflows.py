@@ -69,12 +69,22 @@ def _materialize_delivery(submission: Submission) -> None:
         LineMatchStatus,
         Vendor,
     )
-    from apps.inventory.packs import is_non_stock_line
+    from apps.inventory.packs import is_non_stock_line, is_unreceived_line
 
     documents = list(
         _usable_documents(submission).filter(detected_type=DocumentType.DELIVERY_INVOICE)
     )
-    results = [result for document in documents if (result := _document_result(document))]
+    # An exact duplicate photo is the same immutable evidence, not another
+    # shipment page. Keep its first occurrence only.
+    seen_photo_hashes: set[str] = set()
+    results: list[dict[str, Any]] = []
+    for document in documents:
+        if document.sha256 and document.sha256 in seen_photo_hashes:
+            continue
+        if document.sha256:
+            seen_photo_hashes.add(document.sha256)
+        if result := _document_result(document):
+            results.append(result)
     if not results:
         return
 
@@ -106,6 +116,14 @@ def _materialize_delivery(submission: Submission) -> None:
     invoice_total_cents = _last_int(results, "invoice_total_cents")
     if invoice_total_cents is not None:
         delivery.invoice_total_cents = invoice_total_cents
+    for field in (
+        "printed_total_cases",
+        "printed_total_loose_units",
+        "printed_total_physical_units",
+    ):
+        value = _last_decimal(results, field)
+        if value is not None:
+            setattr(delivery, field, value)
     delivery.status = DeliveryStatus.NEEDS_REVIEW
     delivery.save(
         update_fields=[
@@ -114,6 +132,9 @@ def _materialize_delivery(submission: Submission) -> None:
             "invoice_number",
             "invoice_date",
             "invoice_total_cents",
+            "printed_total_cases",
+            "printed_total_loose_units",
+            "printed_total_physical_units",
             "status",
             "updated_at",
         ]
@@ -124,18 +145,32 @@ def _materialize_delivery(submission: Submission) -> None:
     if not created and delivery.lines.exists():
         return
 
-    raw_lines: list[Any] = []
+    page_lines: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
     for result in results:
         result_lines = result.get("lines")
         if isinstance(result_lines, list):
-            raw_lines.extend(result_lines)
+            page_lines.append((result, [line for line in result_lines if isinstance(line, dict)]))
+    # Long thermal receipts have to be photographed top-to-bottom with an
+    # overlapping product row. Collapse only exact suffix/prefix overlaps, so
+    # an identical product printed elsewhere on the invoice is still retained.
+    raw_lines = _merge_overlapping_invoice_pages(page_lines)
     lines: list[DeliveryLine] = []
     for fallback_position, raw_line in enumerate(raw_lines, start=1):
-        if not isinstance(raw_line, dict):
-            continue
         description = str(_value(raw_line, "description", "") or "").strip()
         position = _positive_int(_value(raw_line, "line_number")) or fallback_position
         non_stock = is_non_stock_line(description)
+        cases = _decimal_or_none(_value(raw_line, "cases"))
+        loose_units = _decimal_or_none(_value(raw_line, "loose_units"))
+        received_units = _decimal_or_none(_value(raw_line, "stated_units"))
+        line_total_cents = _int_or_none(_value(raw_line, "line_total_cents"))
+        unreceived = is_unreceived_line(
+            description,
+            cases=cases,
+            loose_units=loose_units,
+            received_units=received_units,
+            line_total_cents=line_total_cents,
+        )
+        excluded = non_stock or unreceived
         lines.append(
             DeliveryLine(
                 delivery=delivery,
@@ -148,15 +183,22 @@ def _materialize_delivery(submission: Submission) -> None:
                 )[:14],
                 description=description[:300],
                 pack_text=str(_value(raw_line, "pack_text", "") or "")[:80],
-                cases=_decimal_or_none(_value(raw_line, "cases")),
-                received_units=_decimal_or_none(_value(raw_line, "stated_units")),
+                cases=cases,
+                loose_units=loose_units,
+                received_units=received_units,
                 unit_cost_cents=_int_or_none(_value(raw_line, "unit_cost_cents")),
-                line_total_cents=_int_or_none(_value(raw_line, "line_total_cents")),
-                included=not non_stock,
-                match_status=(LineMatchStatus.EXCLUDED if non_stock else LineMatchStatus.UNMATCHED),
-                review_note="Non-stock charge detected from invoice description"
-                if non_stock
-                else "",
+                line_total_cents=line_total_cents,
+                included=not excluded,
+                match_status=(LineMatchStatus.EXCLUDED if excluded else LineMatchStatus.UNMATCHED),
+                review_note=(
+                    "[automatic review] Not received or backordered; excluded from Square."
+                    if unreceived
+                    else (
+                        "[automatic review] Non-stock charge; excluded from Square."
+                        if non_stock
+                        else ""
+                    )
+                ),
             )
         )
     # A duplicate printed line number must not violate the database constraint.
@@ -175,6 +217,86 @@ def _materialize_delivery(submission: Submission) -> None:
     from apps.inventory.services import refresh_delivery_readiness
 
     refresh_delivery_readiness(delivery)
+
+
+def _merge_overlapping_invoice_pages(
+    pages: list[tuple[dict[str, Any], list[dict[str, Any]]]],
+) -> list[dict[str, Any]]:
+    """Join ordered receipt crops without globally collapsing valid repeats.
+
+    Employees are told to photograph a long receipt in order with at least one
+    repeated row. Only an exact suffix/prefix sequence is automatic evidence of
+    overlap. Anything fuzzy remains visible and the inventory readiness guard
+    blocks strong possible duplicates for owner review.
+    """
+
+    combined: list[dict[str, Any]] = []
+    previous_result: dict[str, Any] | None = None
+    for result, lines in pages:
+        if not lines:
+            previous_result = result
+            continue
+        overlap = 0
+        if previous_result is None or _invoice_identities_compatible(previous_result, result):
+            fingerprints = [_invoice_line_fingerprint(line) for line in lines]
+            combined_fingerprints = [_invoice_line_fingerprint(line) for line in combined]
+            maximum = min(len(combined_fingerprints), len(fingerprints))
+            for size in range(maximum, 0, -1):
+                left = combined_fingerprints[-size:]
+                right = fingerprints[:size]
+                if all(fingerprint is not None for fingerprint in left) and left == right:
+                    overlap = size
+                    break
+        combined.extend(lines[overlap:])
+        previous_result = result
+    return combined
+
+
+def _invoice_identities_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    for field in ("vendor_name", "invoice_number", "invoice_date"):
+        left_value = _normalized_text(_value(left, field))
+        right_value = _normalized_text(_value(right, field))
+        if left_value and right_value and left_value != right_value:
+            return False
+    return True
+
+
+def _invoice_line_fingerprint(raw_line: dict[str, Any]) -> tuple[Any, ...] | None:
+    upc = "".join(
+        character for character in str(_value(raw_line, "upc", "")) if character.isdigit()
+    )
+    vendor_sku = _normalized_text(_value(raw_line, "vendor_sku"))
+    description = _normalized_text(_value(raw_line, "description"))
+    pack_text = _normalized_text(_value(raw_line, "pack_text"))
+    line_total = _int_or_none(_value(raw_line, "line_total_cents"))
+    printed_line_number = _positive_int(_value(raw_line, "line_number"))
+
+    if upc:
+        identity: tuple[Any, ...] = ("upc", upc)
+    elif vendor_sku:
+        identity = ("vendor_sku", vendor_sku)
+    elif description and pack_text and line_total is not None:
+        identity = ("description", description)
+    else:
+        return None
+
+    return (
+        *identity,
+        printed_line_number,
+        pack_text,
+        _canonical_decimal(_value(raw_line, "cases")),
+        _canonical_decimal(_value(raw_line, "loose_units")),
+        line_total,
+    )
+
+
+def _normalized_text(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _canonical_decimal(value: Any) -> Decimal | None:
+    parsed = _decimal_or_none(value)
+    return parsed.normalize() if parsed is not None else None
 
 
 @transaction.atomic
@@ -422,6 +544,14 @@ def _first_date(results: list[dict[str, Any]], path: str) -> dt.date | None:
 def _last_int(results: list[dict[str, Any]], path: str) -> int | None:
     for result in reversed(results):
         value = _int_or_none(_value(result, path))
+        if value is not None:
+            return value
+    return None
+
+
+def _last_decimal(results: list[dict[str, Any]], path: str) -> Decimal | None:
+    for result in reversed(results):
+        value = _decimal_or_none(_value(result, path))
         if value is not None:
             return value
     return None

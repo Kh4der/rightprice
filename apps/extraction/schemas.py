@@ -267,15 +267,48 @@ InvoiceMoneyCents = Annotated[
 
 
 class DeliveryInvoiceLine(StrictSchema):
-    line_number: EvidenceValue[InvoiceLineNumber]
-    vendor_sku: EvidenceValue[str]
-    upc: EvidenceValue[str]
-    description: EvidenceValue[str]
-    pack_text: EvidenceValue[str]
-    cases: EvidenceValue[InvoiceCases]
-    stated_units: EvidenceValue[InvoiceUnits]
-    unit_cost_cents: EvidenceValue[InvoiceMoneyCents]
-    line_total_cents: EvidenceValue[InvoiceMoneyCents]
+    line_number: EvidenceValue[InvoiceLineNumber] = Field(
+        description="Printed row number only; absent when the invoice has no row numbers."
+    )
+    vendor_sku: EvidenceValue[str] = Field(
+        description="Distributor item/product number, not the UPC or Square identifier."
+    )
+    upc: EvidenceValue[str] = Field(
+        description="Digits printed below the product barcode, preserving leading zeroes."
+    )
+    description: EvidenceValue[str] = Field(
+        description="Full printed product description, including multipack wording."
+    )
+    pack_text: EvidenceValue[str] = Field(
+        description=(
+            "Case pack and item size in a parseable form such as 12/750ML, 6/1.75L, "
+            "or 2/12/355ML when the case contains two consumer 12-packs."
+        )
+    )
+    cases: EvidenceValue[InvoiceCases] = Field(
+        description="Cases actually received, not cases ordered or backordered."
+    )
+    loose_units: EvidenceValue[InvoiceUnits] = Field(
+        description=(
+            "Loose bottles/cans actually received in addition to whole cases; this is the "
+            "BTL/BT value, not bottles-per-case."
+        )
+    )
+    stated_units: EvidenceValue[InvoiceUnits] = Field(
+        description=(
+            "Total received inventory units only when printed or unambiguous from fully "
+            "legible case, loose-unit, and pack evidence; otherwise absent."
+        )
+    )
+    unit_cost_cents: EvidenceValue[InvoiceMoneyCents] = Field(
+        description=(
+            "Net cost per received inventory unit. Leave absent when consumer multipack "
+            "wording makes the Square sellable unit ambiguous."
+        )
+    )
+    line_total_cents: EvidenceValue[InvoiceMoneyCents] = Field(
+        description="Printed extended net amount for the quantity actually received."
+    )
 
 
 class DeliveryInvoice(StrictSchema):
@@ -284,6 +317,27 @@ class DeliveryInvoice(StrictSchema):
     invoice_date: EvidenceValue[dt.date]
     purchase_order_number: EvidenceValue[str]
     lines: list[DeliveryInvoiceLine] = Field(max_length=1000)
+    printed_total_cases: EvidenceValue[InvoiceUnits] = Field(
+        description=(
+            "Final invoice-footer total for cases actually received, such as TOTAL CASES "
+            "or the first number in TOTAL CS/BTLS. Mark absent on a cropped page or when "
+            "the invoice does not print this total."
+        )
+    )
+    printed_total_loose_units: EvidenceValue[InvoiceUnits] = Field(
+        description=(
+            "Final invoice-footer total for loose bottles/cans received, such as TOTAL BOT "
+            "or the second number in TOTAL CS/BTLS. This is not the total physical bottles "
+            "inside full cases. Mark absent when the invoice does not print it."
+        )
+    )
+    printed_total_physical_units: EvidenceValue[InvoiceUnits] = Field(
+        description=(
+            "Final invoice-footer physical bottle/can count, such as TOTAL BOTTLES. Do not "
+            "substitute a calculated value or a Square sellable-unit count. Mark absent "
+            "when this independent printed total is not present."
+        )
+    )
     subtotal_cents: EvidenceValue[InvoiceMoneyCents]
     tax_cents: EvidenceValue[InvoiceMoneyCents]
     fees_cents: EvidenceValue[InvoiceMoneyCents]

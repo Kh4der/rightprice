@@ -16,9 +16,18 @@ from apps.capture.models import (
     SubmissionKind,
     SubmissionStatus,
 )
-from apps.extraction.processing import aggregate_submission_status, process_document
+from apps.extraction.processing import (
+    aggregate_submission_status,
+    process_document,
+    validate_extraction,
+)
 from apps.extraction.providers import FakeVisionProvider, ProviderConfigurationError
-from apps.extraction.schemas import ClassifiedDocumentType, DocumentClassification, SquareDrawer
+from apps.extraction.schemas import (
+    ClassifiedDocumentType,
+    DeliveryInvoice,
+    DocumentClassification,
+    SquareDrawer,
+)
 from apps.extraction.tasks import process_document_task
 from apps.extraction.tasks import process_submission as process_submission_task
 
@@ -71,6 +80,38 @@ def drawer(*, expected=29_991):
             "counted_cash_cents": absent(),
             "over_short_cents": absent(),
         }
+    )
+
+
+def delivery_invoice_without_lines():
+    return DeliveryInvoice.model_validate(
+        {
+            "vendor_name": observed("Southern Distributor"),
+            "invoice_number": observed("INV-CROP"),
+            "invoice_date": observed("2026-09-26"),
+            "purchase_order_number": absent(),
+            "lines": [],
+            "printed_total_cases": absent(),
+            "printed_total_loose_units": absent(),
+            "printed_total_physical_units": absent(),
+            "subtotal_cents": absent(),
+            "tax_cents": absent(),
+            "fees_cents": absent(),
+            "invoice_total_cents": absent(),
+        }
+    )
+
+
+def test_cropped_long_invoice_section_is_a_warning_not_a_hard_failure():
+    checks = validate_extraction(
+        classification(ClassifiedDocumentType.DELIVERY_INVOICE, entire=False),
+        delivery_invoice_without_lines(),
+    )
+
+    crop_check = next(check for check in checks if check["name"] == "complete_document_visible")
+    assert crop_check["severity"] == "warning"
+    assert not any(
+        check["passed"] is False and check.get("severity", "hard") == "hard" for check in checks
     )
 
 
@@ -152,7 +193,7 @@ def test_process_document_persists_evidence_checks_and_ready_status(employee):
     assert result.document_count == 1
     assert result.processed_at is not None
     assert "flat_field_clahe" in result.preparation_steps
-    assert result.extracted_data["schema_version"] == 1
+    assert result.extracted_data["schema_version"] == 3
     assert result.extracted_data["classification"]["document_type"]["value"] == (
         DocumentType.SQUARE_DRAWER_SCREEN
     )

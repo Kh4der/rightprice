@@ -27,7 +27,11 @@ from apps.inventory.claude_launcher import (
     LauncherConfig,
     run_inventory_launcher,
 )
-from apps.inventory.claude_protocol import RESULT_JSON_PATH, RESULT_XLSX_PATH
+from apps.inventory.claude_protocol import (
+    MANIFEST_NAME,
+    RESULT_JSON_PATH,
+    RESULT_XLSX_PATH,
+)
 from apps.inventory.claude_sandbox import dispatch_inventory_sandbox_job
 from apps.inventory.models import (
     Delivery,
@@ -117,7 +121,7 @@ class FakeQueueClient:
                 return SimpleNamespace(
                     metadata={
                         "inventory_job_id": str(job.id),
-                        "workflow_version": "inventory_invoice_v1",
+                        "workflow_version": "inventory_invoice_v3",
                     }
                 )
 
@@ -155,8 +159,11 @@ class OutputWritingRunner:
 
     async def run(self, config, workspace, job_id, work):
         self.calls.append((config, workspace, job_id, work))
+        manifest = json.loads((workspace / MANIFEST_NAME).read_text(encoding="utf-8"))
         (workspace / RESULT_JSON_PATH).write_text(
-            json.dumps(_valid_invoice_result()),
+            json.dumps(
+                _valid_invoice_result([source["document_id"] for source in manifest["documents"]])
+            ),
             encoding="utf-8",
         )
         (workspace / RESULT_XLSX_PATH).write_bytes(_values_only_workbook())
@@ -218,9 +225,7 @@ def test_launcher_failure_releases_job_to_owner_review_and_cleans(
     assert queued_launcher_job.status == InventorySandboxJobStatus.FAILED
     assert queued_launcher_job.delivery.status == DeliveryStatus.NEEDS_REVIEW
     assert queued_launcher_job.delivery.submission.status == SubmissionStatus.NEEDS_REVIEW
-    assert "original photos are saved" in (
-        queued_launcher_job.delivery.submission.processing_error
-    )
+    assert "original photos are saved" in (queued_launcher_job.delivery.submission.processing_error)
     assert client.stop_calls[0][0] == "work_test"
     assert client.stop_calls[0][1]["force"] is True
     assert not list(tmp_path.iterdir())

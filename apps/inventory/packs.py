@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 # Volume units that may trail a pack spec. Present so "12/750ML" is recognised
 # as a pack of a sized product, and a bare "750ML" is recognised as a size with
@@ -94,14 +95,14 @@ class PackConfig:
     #: text, so the UI can say where it got the number.
     from_mapping: bool = False
 
-    def units_for(self, cases: int) -> int:
+    def units_for(self, cases: int, *, loose_units: int = 0) -> int:
         """
         Sellable units received for a number of cases.
 
         Negative case counts are allowed and meaningful: a credit or a return is
         a negative delivery, and it must reduce stock by the same conversion.
         """
-        return cases * self.units_per_case
+        return cases * self.units_per_case + loose_units
 
 
 def parse_pack(text: str | None) -> PackConfig:
@@ -206,9 +207,45 @@ class LineCheck:
         return self.delta == 0
 
 
-def check_units(*, cases: int, units_per_case: int, stated_units: int) -> LineCheck:
-    """Units received must be the case count times the pack size."""
-    return LineCheck("units = cases x units_per_case", cases * units_per_case, stated_units)
+def calculate_received_units(
+    *,
+    cases: Decimal | int | None,
+    units_per_case: int | None,
+    loose_units: Decimal | int | None = None,
+) -> Decimal | None:
+    """Return full-case units plus separately printed loose bottles.
+
+    ``None`` means there is not enough evidence to calculate a quantity. When a
+    case count is present, the loose-unit count must also be explicit, including
+    a printed or owner-entered zero. Missing evidence is never assumed to be zero.
+    """
+
+    if cases is None:
+        if loose_units is None or Decimal(str(loose_units)) == 0:
+            return None
+        return Decimal(str(loose_units))
+    if cases is not None and loose_units is None:
+        return None
+    loose = Decimal(str(loose_units))
+    if units_per_case is None:
+        return None
+    return Decimal(str(cases)) * Decimal(units_per_case) + loose
+
+
+def check_units(
+    *,
+    cases: int,
+    units_per_case: int,
+    stated_units: int,
+    loose_units: int = 0,
+) -> LineCheck:
+    """Units received must equal full-case units plus loose bottles."""
+
+    return LineCheck(
+        "units = cases x units_per_case + loose_units",
+        cases * units_per_case + loose_units,
+        stated_units,
+    )
 
 
 def check_line_total(*, quantity: int, unit_cost_cents: int, stated_total_cents: int) -> LineCheck:
@@ -221,6 +258,39 @@ def check_line_total(*, quantity: int, unit_cost_cents: int, stated_total_cents:
     return LineCheck(
         "line_total = quantity x unit_cost", quantity * unit_cost_cents, stated_total_cents
     )
+
+
+def line_total_matches_rounded_unit_cost(
+    *,
+    quantity: Decimal | int | None,
+    unit_cost_cents: int | None,
+    line_total_cents: int | None,
+) -> bool:
+    """Validate an extended total when the printed per-unit cost is rounded.
+
+    Johnson-style invoices can print a bottle cost rounded to one cent while
+    calculating the extension from a more precise case cost.  The safe test is
+    therefore whether ``line_total / quantity`` rounds back to the visibly
+    printed unit cost.  This accepts the ordinary exact case as well and rejects
+    broader discrepancies.
+    """
+
+    if quantity is None or unit_cost_cents is None or line_total_cents is None:
+        return False
+    if unit_cost_cents < 0 or line_total_cents < 0:
+        return False
+    try:
+        normalized_quantity = Decimal(str(quantity))
+    except (InvalidOperation, ValueError):
+        return False
+    if (
+        not normalized_quantity.is_finite()
+        or normalized_quantity <= 0
+        or normalized_quantity != normalized_quantity.to_integral_value()
+    ):
+        return False
+    average_cost = Decimal(line_total_cents) / normalized_quantity
+    return average_cost.quantize(Decimal("1"), rounding=ROUND_HALF_UP) == Decimal(unit_cost_cents)
 
 
 def check_invoice_total(*, line_totals_cents: list[int], stated_total_cents: int) -> LineCheck:
@@ -255,3 +325,62 @@ def is_non_stock_line(description: str) -> bool:
         "KEG DEP",
     )
     return any(marker in text for marker in markers)
+
+
+def is_unreceived_line(
+    description: str,
+    *,
+    cases: Decimal | int | None = None,
+    loose_units: Decimal | int | None = None,
+    received_units: Decimal | int | None = None,
+    line_total_cents: int | None = None,
+) -> bool:
+    """Return whether a printed invoice row clearly delivered no inventory.
+
+    Backordered rows remain useful audit evidence, but they must never become a
+    Square inventory adjustment or a new catalogue item.  Positive or negative
+    quantity evidence always wins over wording, so a product description that
+    merely mentions a reorder cannot hide a real receipt or return.
+    """
+
+    quantities: list[Decimal] = []
+    for raw in (cases, loose_units, received_units):
+        if raw is None:
+            continue
+        try:
+            value = Decimal(str(raw))
+        except (InvalidOperation, ValueError):
+            return False
+        if not value.is_finite():
+            return False
+        quantities.append(value)
+    if any(value != 0 for value in quantities):
+        return False
+
+    text = (description or "").upper()
+    backordered = any(
+        marker in text
+        for marker in (
+            "BACKORDER",
+            "NOT DELIVERED",
+            "NOT SHIPPED",
+            "OUT OF STOCK",
+        )
+    )
+    if backordered:
+        return True
+
+    # Without explicit wording, require the strongest quantity fact available:
+    # a visibly stated total received of zero. A zero dollar promotional line
+    # with positive units was returned above and remains stock.
+    if received_units is None:
+        return False
+    return (
+        bool(quantities)
+        and all(value == 0 for value in quantities)
+        and line_total_cents
+        in {
+            None,
+            0,
+        }
+    )

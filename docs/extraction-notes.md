@@ -41,9 +41,10 @@ measured cost claim.
    the classification.
 4. Reject unknown documents, Florida Lottery draw schedules, more than one
    physical document in frame, and conflicts with an explicitly requested
-   capture slot. A cropped document proceeds through extraction but receives a
-   hard review check so the partial evidence is preserved without becoming
-   ready automatically.
+   capture slot. A cropped daily-report or payout document receives a hard
+   review check. A cropped delivery-invoice section receives a warning because
+   long distributor receipts are intentionally photographed top-to-bottom with
+   one overlapping product row.
 5. Re-prepare the image using the detected document's transform and ask for the
    one matching strict schema.
 6. Run deterministic evidence and arithmetic checks. A hard failure routes the
@@ -78,7 +79,8 @@ Examples include:
 - cash plus card versus total collected;
 - drawer expected cash from opening cash, cash sales/refunds, and paid in/out;
 - the Square report cash value versus drawer cash sales;
-- invoice cases multiplied by units per case; and
+- invoice cases multiplied by reviewed Square units per case, plus loose
+  bottles/cans received; and
 - invoice line totals and grand total when the required printed operands exist.
 
 An absent value is not zero. A visible but unreadable value is not guessed. A
@@ -123,6 +125,24 @@ crosses real characters.
 The white Square receipt is already high contrast. It receives only orientation
 normalization and resizing. Other/unknown documents use the neutral path.
 
+### Distributor delivery invoices
+
+Private representative examples were reviewed for Johnson-style tabular pages
+and Southern-style long scan sheets. The originals are not repository fixtures:
+they contain merchant account details, addresses, and signatures. Regression
+tests use synthetic structured rows instead.
+
+The extractor maps `CASES/BTL` or `CS/BT`, `QPC/BPC`, item size, distributor
+product number, UPC, net unit cost, and extended line total explicitly. A long
+receipt is assembled from ordered crops by removing only an exact suffix/prefix
+row overlap. Exact duplicate source photos are ignored. Strong duplicate rows
+which cannot be proven to be a crop overlap block posting for owner review.
+
+Zero-quantity backorders are retained as evidence but excluded from Square.
+Nested consumer packs such as a case containing two 12-packs remain ambiguous
+until an owner-reviewed Square mapping establishes whether the store sells
+packs or singles.
+
 ## Why classification rejects extra documents
 
 Because two documents can contain plausible money values, letting the model
@@ -139,7 +159,8 @@ zeros.
 - The current drawer fixture is open/current, not an ended drawer with counted
   cash and over/short.
 - The lottery fixtures contain zero activity and incomplete ticket ranges.
-- There is no real distributor invoice fixture and no payout-evidence fixture.
+- There is no publishable real distributor invoice fixture and no
+  payout-evidence fixture. Private examples informed synthetic invoice tests.
 - There is no corpus-level accuracy result for the configured OpenAI model.
 - Automatic fallback, independent second opinions, and another provider are not
   implemented.

@@ -40,7 +40,7 @@ from .schemas import (
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 TERMINAL_DOCUMENT_STATUSES = {
     DocumentStatus.EXTRACTED,
     DocumentStatus.REVIEWED,
@@ -407,12 +407,25 @@ def validate_extraction(
 
     checks: list[dict[str, Any]] = []
     if not classification.entire_document_visible:
-        checks.append(
-            _failed_check(
-                "complete_document_visible",
-                "The classifier found a cropped edge or missing total; retake the photo.",
+        if isinstance(result, DeliveryInvoice):
+            checks.append(
+                {
+                    "name": "complete_document_visible",
+                    "passed": False,
+                    "severity": "warning",
+                    "detail": (
+                        "This is one section of a long invoice. Make sure the submission "
+                        "also includes the header, an overlapping product row, and totals."
+                    ),
+                }
             )
-        )
+        else:
+            checks.append(
+                _failed_check(
+                    "complete_document_visible",
+                    "The classifier found a cropped edge or missing total; retake the photo.",
+                )
+            )
 
     for path, evidence in _walk_evidence(result):
         if evidence.present and not evidence.legible:
@@ -528,6 +541,7 @@ def _required_evidence_checks(result: StrictSchema) -> list[dict[str, Any]]:
                     f"lines[{index}].description",
                     f"lines[{index}].pack_text",
                     f"lines[{index}].cases",
+                    f"lines[{index}].loose_units",
                     f"lines[{index}].line_total_cents",
                 ]
             )

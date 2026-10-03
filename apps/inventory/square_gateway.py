@@ -22,6 +22,7 @@ from apps.squareapi.client import get_client, to_rfc3339
 from .boundaries import is_demo_inventory_request
 from .matching import line_readiness_issues
 from .models import Delivery, DeliveryLine, LineMatchStatus
+from .packs import line_total_matches_rounded_unit_cost
 
 BATCH_SIZE = 100
 IDEMPOTENCY_NAMESPACE = uuid.UUID("730bceab-075c-4d43-b5e0-33dd63099e5a")
@@ -213,8 +214,11 @@ def _validated_total_cost_cents(line: DeliveryLine) -> int | None:
         return None
     if line.unit_cost_cents < 0 or line.received_units <= 0:
         return None
-    expected = Decimal(line.unit_cost_cents) * line.received_units
-    if expected != expected.to_integral_value() or int(expected) != line.line_total_cents:
+    if not line_total_matches_rounded_unit_cost(
+        quantity=line.received_units,
+        unit_cost_cents=line.unit_cost_cents,
+        line_total_cents=line.line_total_cents,
+    ):
         return None
     return line.line_total_cents
 

@@ -230,9 +230,7 @@ def payout_create(request):
                 cents = None
                 if dollars is not None:
                     cents = int(
-                        (Decimal(dollars) * 100).quantize(
-                            Decimal("1"), rounding=ROUND_HALF_UP
-                        )
+                        (Decimal(dollars) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
                     )
                 PayoutRecord.objects.create(
                     submission=submission,
@@ -299,7 +297,7 @@ def inventory_create(request):
         _capture_context(
             form,
             title="Receive delivery",
-            step_hint="Photograph every invoice page edge to edge.",
+            step_hint="Take the header, every product row, and the final total.",
             submission_kind=SubmissionKind.INVENTORY,
         ),
     )

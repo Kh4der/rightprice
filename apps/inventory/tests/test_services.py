@@ -228,6 +228,124 @@ def test_exact_upc_matches_but_count_snapshot_is_required(delivery):
     assert "square_count_missing" in {issue.code for issue in result.issues}
 
 
+def test_loose_units_are_added_after_case_conversion(delivery):
+    line = delivery.lines.get()
+    line.loose_units = Decimal("2")
+    line.received_units = None
+    line.save(update_fields=["loose_units", "received_units", "updated_at"])
+
+    refresh_delivery_readiness(delivery)
+
+    line.refresh_from_db()
+    assert line.units_per_case == 12
+    assert line.received_units == Decimal("14")
+
+
+def test_readiness_requires_final_total_or_footer_evidence_for_photographed_invoice(delivery):
+    delivery.invoice_date = dt.date(2026, 9, 26)
+    delivery.save(update_fields=["invoice_date", "updated_at"])
+    for index, label in enumerate(("header", "partial rows"), start=1):
+        Document.objects.create(
+            submission=delivery.submission,
+            file=f"test/inventory/{index}.jpg",
+            original_name=f"{label}.jpg",
+            media_type="image/jpeg",
+            size_bytes=10,
+            sha256=f"{index:064x}",
+            detected_type=DocumentType.DELIVERY_INVOICE,
+            status=DocumentStatus.EXTRACTED,
+            extracted_data={
+                "result": {
+                    "vendor_name": {"value": "Distributor"},
+                    "invoice_number": {"value": "INV-100"},
+                    "invoice_date": {"value": "2026-09-26"},
+                }
+            },
+        )
+
+    result = refresh_delivery_readiness(delivery)
+
+    issue = next(
+        issue for issue in result.issues if issue.code == "invoice_footer_evidence_missing"
+    )
+    assert not result.ready
+    assert "bottom/footer photo" in issue.message
+
+
+def test_readiness_compares_printed_quantity_totals_to_included_rows(delivery):
+    line = delivery.lines.get()
+    line.loose_units = Decimal("0")
+    line.save(update_fields=["loose_units", "updated_at"])
+    delivery.invoice_total_cents = 6_000
+    delivery.printed_total_cases = Decimal("2")
+    delivery.printed_total_loose_units = Decimal("0")
+    delivery.printed_total_physical_units = Decimal("12")
+    delivery.save(
+        update_fields=[
+            "invoice_total_cents",
+            "printed_total_cases",
+            "printed_total_loose_units",
+            "printed_total_physical_units",
+            "updated_at",
+        ]
+    )
+
+    result = refresh_delivery_readiness(delivery)
+    codes = {issue.code for issue in result.issues}
+
+    assert "invoice_total_cases_mismatch" in codes
+    assert "invoice_total_loose_units_mismatch" not in codes
+    assert "invoice_total_physical_units_mismatch" not in codes
+
+
+def test_physical_footer_total_uses_nested_pack_container_count(delivery):
+    line = delivery.lines.get()
+    line.pack_text = "2/12/355ML"
+    line.loose_units = Decimal("0")
+    line.units_per_case = 2
+    line.received_units = Decimal("2")
+    line.save(
+        update_fields=[
+            "pack_text",
+            "loose_units",
+            "units_per_case",
+            "received_units",
+            "updated_at",
+        ]
+    )
+    delivery.printed_total_physical_units = Decimal("24")
+    delivery.save(update_fields=["printed_total_physical_units", "updated_at"])
+
+    result = refresh_delivery_readiness(delivery)
+
+    assert not any(issue.code.startswith("invoice_total_physical_units") for issue in result.issues)
+
+
+def test_zero_backordered_line_is_preserved_but_excluded(delivery):
+    backorder = DeliveryLine.objects.create(
+        delivery=delivery,
+        position=2,
+        vendor_sku="BACK-1",
+        upc="00012345678905",
+        description="Sample Rum — 1 CASE BACKORDERED, REORDER",
+        pack_text="6/1.75L",
+        cases=Decimal("0"),
+        loose_units=Decimal("0"),
+        received_units=Decimal("0"),
+        unit_cost_cents=2_000,
+        line_total_cents=0,
+    )
+
+    result = refresh_delivery_readiness(delivery)
+
+    backorder.refresh_from_db()
+    assert DeliveryLine.objects.filter(pk=backorder.pk).exists()
+    assert backorder.included is False
+    assert backorder.match_status == LineMatchStatus.EXCLUDED
+    assert "No inventory was received" in backorder.review_note
+    assert result.excluded_lines == 1
+
+
 def test_name_only_match_remains_a_reviewable_suggestion(delivery):
     line = delivery.lines.get()
     line.vendor_sku = ""
@@ -291,9 +409,7 @@ def test_nearest_matches_uses_bottle_size_from_pack_text(delivery):
     line.pack_text = "12/750ML"
     line.vendor_sku = ""
     line.upc = ""
-    line.save(
-        update_fields=["description", "pack_text", "vendor_sku", "upc", "updated_at"]
-    )
+    line.save(update_fields=["description", "pack_text", "vendor_sku", "upc", "updated_at"])
 
     suggestions = nearest_catalog_matches(line)
 
@@ -417,7 +533,7 @@ def test_catalog_refresh_is_read_only_and_caches_location_data(delivery, owner, 
     cached = SquareCatalogVariation.objects.get(pk="VAR-CACHE")
 
     assert result.seen == 1
-    assert client.catalog.calls == [{"types": "ITEM,ITEM_VARIATION"}]
+    assert client.catalog.calls == [{"types": "CATEGORY,ITEM,ITEM_VARIATION"}]
     assert cached.item_name == "Cache Vodka"
     assert cached.gtin == "00012345678905"
     assert cached.track_inventory is True
@@ -644,6 +760,30 @@ def test_square_cost_is_validated_full_receipt_total(delivery, owner, settings):
     assert "cost_money" not in adjustment
 
 
+def test_square_cost_accepts_johnson_style_rounded_per_unit_price(delivery, owner, settings):
+    settings.SQUARE_LOCATION_ID = "TEST_LOCATION"
+    settings.SQUARE_INVENTORY_COST_WRITES_ENABLED = True
+    line = delivery.lines.get()
+    line.cases = Decimal("3")
+    line.units_per_case = 24
+    line.received_units = Decimal("72")
+    line.unit_cost_cents = 171
+    line.line_total_cents = 12_300
+    line.square_catalog_variation_id = "VAR-1"
+    line.square_item_name = "Test Bourbon - 750ml"
+    line.match_status = LineMatchStatus.MATCHED
+    line.square_count_before = Decimal("0")
+    line.square_count_variation_id = "VAR-1"
+    line.projected_count_after = Decimal("72")
+    line.square_count_snapshot_at = timezone.now()
+    line.save()
+
+    adjustment = build_square_batches(delivery, actor=owner)[0].changes[0]["adjustment"]
+
+    assert adjustment["quantity"] == "72"
+    assert adjustment["cost_money"]["amount"] == 12_300
+
+
 def test_square_cost_is_omitted_when_separate_gate_is_off(delivery, owner, settings):
     settings.SQUARE_LOCATION_ID = "TEST_LOCATION"
     settings.SQUARE_INVENTORY_COST_WRITES_ENABLED = False
@@ -757,6 +897,31 @@ def test_readiness_blocks_duplicate_vendor_invoice(delivery, owner):
     )
 
 
+def test_readiness_blocks_retake_with_invoice_and_vendor_format_variants(delivery, owner):
+    delivery.invoice_number = "RP445566"
+    delivery.invoice_date = dt.date(2026, 9, 30)
+    delivery.vendor.name = "Southern Glazer's of FL"
+    delivery.vendor.save(update_fields=["name"])
+    delivery.save(update_fields=["invoice_number", "invoice_date", "updated_at"])
+    earlier_submission = Submission.objects.create(
+        kind=SubmissionKind.INVENTORY,
+        status=SubmissionStatus.APPROVED,
+        submitted_by=owner,
+    )
+    other_vendor = Vendor.objects.create(name="Southern Glazers of Florida")
+    Delivery.objects.create(
+        submission=earlier_submission,
+        vendor=other_vendor,
+        invoice_number="RP-445 566",
+        invoice_date=delivery.invoice_date,
+        status=DeliveryStatus.PUSHED,
+    )
+
+    result = refresh_delivery_readiness(delivery)
+
+    assert "duplicate_vendor_invoice" in {issue.code for issue in result.issues}
+
+
 def test_rejected_vendor_invoice_duplicate_no_longer_blocks(delivery, owner):
     delivery.invoice_date = dt.date(2026, 9, 26)
     delivery.save(update_fields=["invoice_date", "updated_at"])
@@ -797,6 +962,97 @@ def test_readiness_blocks_reused_invoice_photo(delivery, owner):
 
     assert not result.ready
     assert "duplicate_source_photo" in {issue.code for issue in result.issues}
+
+
+def test_readiness_blocks_conflicting_invoice_identities_across_photos(delivery):
+    first = _add_delivery_document(delivery.submission, "a" * 64, "page-1.jpg")
+    second = _add_delivery_document(delivery.submission, "b" * 64, "page-2.jpg")
+    for document, invoice_number in ((first, "INV-100"), (second, "INV-200")):
+        document.extracted_data = {
+            "result": {
+                "vendor_name": {"value": "Distributor"},
+                "invoice_number": {"value": invoice_number},
+                "invoice_date": {"value": "2026-10-03"},
+            }
+        }
+        document.save(update_fields=["extracted_data"])
+
+    result = refresh_delivery_readiness(delivery)
+
+    assert not result.ready
+    assert "mixed_invoice_photos" in {issue.code for issue in result.issues}
+    assert delivery.lines.count() == 1
+
+
+def test_readiness_accepts_harmless_invoice_identity_formatting_variants(delivery):
+    first = _add_delivery_document(delivery.submission, "a" * 64, "page-1.jpg")
+    second = _add_delivery_document(delivery.submission, "b" * 64, "page-2.jpg")
+    first.extracted_data = {
+        "result": {
+            "vendor_name": {"value": "Southern Glazer's of FL"},
+            "invoice_number": {"value": "168-1351"},
+            "invoice_date": {"value": "09/30/26"},
+        }
+    }
+    second.extracted_data = {
+        "result": {
+            "vendor_name": {"value": "Southern Glazers of Florida"},
+            "invoice_number": {"value": "168 1351"},
+            "invoice_date": {"value": "2026-09-30"},
+        }
+    }
+    first.save(update_fields=["extracted_data"])
+    second.save(update_fields=["extracted_data"])
+
+    result = refresh_delivery_readiness(delivery)
+
+    assert "mixed_invoice_photos" not in {issue.code for issue in result.issues}
+
+
+def test_readiness_preserves_but_blocks_possible_overlapping_photo_line(delivery):
+    original = delivery.lines.get()
+    duplicate = DeliveryLine.objects.create(
+        delivery=delivery,
+        position=2,
+        vendor_sku=original.vendor_sku,
+        upc=original.upc,
+        description=original.description,
+        pack_text=original.pack_text,
+        cases=original.cases,
+        loose_units=original.loose_units,
+        received_units=original.received_units,
+        unit_cost_cents=original.unit_cost_cents,
+        line_total_cents=original.line_total_cents,
+    )
+
+    result = refresh_delivery_readiness(delivery)
+
+    assert not result.ready
+    assert "possible_duplicate_line" in {issue.code for issue in result.issues}
+    assert DeliveryLine.objects.filter(pk__in=[original.pk, duplicate.pk]).count() == 2
+
+
+def test_readiness_blocks_same_upc_when_overlap_ocr_details_disagree(delivery):
+    original = delivery.lines.get()
+    duplicate = DeliveryLine.objects.create(
+        delivery=delivery,
+        position=2,
+        vendor_sku=original.vendor_sku,
+        upc=original.upc,
+        description=original.description,
+        pack_text=original.pack_text,
+        cases=original.cases,
+        loose_units=None,
+        received_units=original.received_units,
+        unit_cost_cents=1099,
+        line_total_cents=original.line_total_cents,
+    )
+
+    result = refresh_delivery_readiness(delivery)
+
+    assert not result.ready
+    assert "possible_duplicate_line" in {issue.code for issue in result.issues}
+    assert DeliveryLine.objects.filter(pk__in=[original.pk, duplicate.pk]).count() == 2
 
 
 def test_push_rechecks_duplicate_invoice_before_square_write(delivery, owner, settings):
@@ -1026,6 +1282,7 @@ def test_final_workbook_has_cost_comparison_and_download_only_instructions(deliv
     assert "Finalized owner-reviewed snapshot" in sheet
     assert "cannot be uploaded back into the app" in sheet
     assert "Invoice unit cost" in sheet
+    assert "Loose units" in sheet
     assert "Square baseline unit cost" in sheet
     assert "Unit cost change %" in sheet
     assert "+12.5%" in sheet
